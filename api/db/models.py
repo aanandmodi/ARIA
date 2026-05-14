@@ -92,6 +92,12 @@ class Contact(Base):
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     avg_response_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    nickname: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    relationship_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    writing_style: Mapped[dict] = mapped_column(JSON, default=dict)
+    importance_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    style_sample_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, server_default=func.now()
     )
@@ -231,3 +237,61 @@ class TelegramSession(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
         server_default=func.now(),
     )
+
+
+# ─── Memory System ────────────────────────────────────────────────────────────
+
+class UserProfile(Base):
+    __tablename__ = "user_profile"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    client_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    tone: Mapped[str] = mapped_column(String(64), default="casual")
+    language: Mapped[str] = mapped_column(String(32), default="en")
+    work_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    active_hours_start: Mapped[int] = mapped_column(Integer, default=9)
+    active_hours_end: Mapped[int] = mapped_column(Integer, default=22)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
+    reply_format: Mapped[str] = mapped_column(String(64), default="auto")
+    extra_prefs: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+        server_default=func.now()
+    )
+
+
+class Memory(Base):
+    __tablename__ = "memories"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    fact: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_message_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, server_default=func.now()
+    )
+    last_accessed: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, server_default=func.now()
+    )
+    access_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ConversationTurn(Base):
+    __tablename__ = "conversation_turns"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    contact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, server_default=func.now()
+    )
+

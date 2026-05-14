@@ -140,6 +140,23 @@ async def _route_reply(original: Message, text: str, db: AsyncSession) -> None:
     if success:
         original.replied_at = datetime.utcnow()
         await db.flush()
+        
+        # Add conversation turn and extract memory
+        from api.db.models import Contact
+        stmt = select(Contact).where(Contact.email == original.sender_id)
+        contact = (await db.execute(stmt)).scalar_one_or_none()
+        if not contact:
+            stmt = select(Contact).where(Contact.phone == original.sender_id)
+            contact = (await db.execute(stmt)).scalar_one_or_none()
+            
+        if contact:
+            from api.services.conversation_service import append_turn, maybe_compress
+            from api.llm.memory_extractor import extract_and_store
+            
+            await extract_and_store(original.content, text, db)
+            await append_turn(db, contact.id, "assistant", text)
+            await maybe_compress(db, contact.id)
+            
         # Cancel follow-up if exists
         try:
             redis = await get_redis()
@@ -219,5 +236,19 @@ async def handle_callback(callback: CallbackQuery, db: AsyncSession) -> None:
             await db.flush()
         await telegram_service.answer_callback(callback.id, "Send your edited reply")
         await telegram_service.send_message("✏️ Type your edited reply:")
+
+    elif action == "qr":
+        qr_parts = msg_id_str.split(":", 1)
+        if len(qr_parts) == 2:
+            real_msg_id, qr_text = qr_parts
+            try:
+                result = await db.execute(select(Message).where(Message.id == uuid.UUID(real_msg_id)))
+                msg = result.scalar_one_or_none()
+                if msg:
+                    await _route_reply(msg, qr_text, db)
+            except Exception as e:
+                log.error("qr_reply_failed", error=str(e))
+        await telegram_service.answer_callback(callback.id, "Reply Sent ✓")
+
     else:
         await telegram_service.answer_callback(callback.id)

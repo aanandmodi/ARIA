@@ -11,12 +11,17 @@ from api.core.config import settings
 from api.core.logging import log
 from api.db.models import TelegramSession
 from api.db.session import async_session_factory
-from api.llm.intent import parse_intent
+from api.llm.intent import parse_intent, IntentResult
+from api.llm.intent_v2 import parse_intent_v2
 from api.handlers.router import dispatch
 from api.handlers.reply_handler import handle_callback, handle as handle_reply
 from api.services import telegram_service
 
 router = APIRouter()
+
+# Intents that V2 specialises in — if V2 returns one of these with high
+# confidence, trust it and skip the V1 parse entirely.
+_V2_DEEP_INTENTS = {"github_action", "create_memory", "send_sms", "system_status"}
 
 WELCOME_MSG = (
     "👋 <b>Welcome to ARIA!</b>\n\n"
@@ -26,7 +31,11 @@ WELCOME_MSG = (
     "• <i>remind me about X tomorrow 9am</i>\n"
     "• <i>search emails about project</i>\n"
     "• <i>spent 500 on dinner</i>\n"
-    "• <i>play some jazz</i>\n\n"
+    "• <i>play some jazz</i>\n"
+    "• <i>check my github PRs</i>\n"
+    "• <i>remember that John prefers email</i>\n"
+    "• <i>send sms to +91... saying ...</i>\n"
+    "• <i>system status</i>\n\n"
     "🚀 ARIA is online and ready!"
 )
 
@@ -106,6 +115,17 @@ async def telegram_webhook(request: Request) -> Response:
             await websearch_handler.handle({"query": query}, db, update)
         return Response(status_code=200)
 
+    if text.startswith("/status"):
+        await telegram_service.send_typing()
+        async with async_session_factory() as db:
+            try:
+                await dispatch(IntentResult(intent="system_status", params={}), db, update)
+                await db.commit()
+            except Exception as exc:
+                log.error("status_command_error", error=str(exc))
+                await db.rollback()
+        return Response(status_code=200)
+
     # 4b. Check if user is in reply session — if so, bypass LLM intent
     #     and route directly to reply handler
     async with async_session_factory() as db:
@@ -125,10 +145,20 @@ async def telegram_webhook(request: Request) -> Response:
             log.error("session_check_error", error=str(exc))
             await db.rollback()
 
-    # 5. Parse intent via LLM
+    # 5. Two-stage NLU pipeline
     await telegram_service.send_typing()
-    intent = await parse_intent(text)
-    log.info("intent_parsed", intent=intent.intent, params=str(intent.params)[:200])
+
+    # Stage 1: Try V2 for deep-integration intents
+    intent_v2 = await parse_intent_v2(text)
+    if intent_v2.intent in _V2_DEEP_INTENTS and intent_v2.confidence >= 0.7:
+        # V2 is confident about a deep intent — use it directly
+        intent = IntentResult(intent=intent_v2.intent, params=intent_v2.params)
+        log.info("intent_parsed_v2", intent=intent.intent, confidence=intent_v2.confidence,
+                 params=str(intent.params)[:200])
+    else:
+        # Stage 2: Fall back to V1 for the full command set
+        intent = await parse_intent(text)
+        log.info("intent_parsed_v1", intent=intent.intent, params=str(intent.params)[:200])
 
     # 6. Dispatch to handler
     async with async_session_factory() as db:
@@ -141,3 +171,4 @@ async def telegram_webhook(request: Request) -> Response:
             await telegram_service.send_message("⚠️ Something went wrong processing your request.")
 
     return Response(status_code=200)
+

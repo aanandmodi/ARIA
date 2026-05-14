@@ -90,6 +90,8 @@ async def edit_message(
         log.error("telegram_edit_failed", error=str(exc), msg_id=message_id)
 
 
+import re
+
 async def send_notification(
     msg_id: str,
     platform: str,
@@ -99,6 +101,8 @@ async def send_notification(
     category: str,
     urgency: str,
     subject: str | None = None,
+    content: str | None = None,
+    quick_replies: list[str] | None = None,
 ) -> int:
     """
     Build and send a formatted notification for an inbound message.
@@ -112,8 +116,23 @@ async def send_notification(
     ]
     if subject:
         lines.append(f"📌 <i>{_escape_html(subject)}</i>")
+    
+    # OTP Extraction
+    otp_match = None
+    if content:
+        otp_match = re.search(r'\b(\d{4,8})\b', content)
+        if otp_match and ('code' in content.lower() or 'otp' in content.lower() or 'verification' in content.lower()):
+            lines.append(f"🔑 <b>OTP:</b> <code>{otp_match.group(1)}</code>")
+    
     lines.append("")
-    lines.append(_escape_html(summary))
+    if content and len(content) < 200:
+        lines.append(_escape_html(content))
+    else:
+        lines.append(_escape_html(summary))
+        if content:
+            lines.append("")
+            lines.append(f"<i>Snippet: {_escape_html(content[:150])}...</i>")
+    
     lines.append("")
     lines.append(
         f"{imp_emoji} Importance {importance}/10 · {category} · {urgency}"
@@ -121,13 +140,24 @@ async def send_notification(
 
     text = "\n".join(lines)
 
-    keyboard = InlineKeyboardMarkup([
+    buttons = [
         [
             InlineKeyboardButton("💬 Reply", callback_data=f"reply:{msg_id}"),
             InlineKeyboardButton("🔇 Dismiss", callback_data=f"dismiss:{msg_id}"),
             InlineKeyboardButton("⏰ Snooze 1h", callback_data=f"snooze:{msg_id}"),
         ]
-    ])
+    ]
+    
+    if quick_replies:
+        for qr in quick_replies:
+            # We must keep callback_data under 64 bytes. qr itself might be up to ~40 bytes
+            # Format: 'qr:{msg_id}:{text[:20]}' - actually it's easier to store the qr in a cache or just put it in the callback if it's small.
+            # "qr:{msg_id}:{text}"
+            cb_data = f"qr:{msg_id}:{qr}"
+            if len(cb_data.encode('utf-8')) <= 64:
+                buttons.append([InlineKeyboardButton(f"⚡ {qr}", callback_data=cb_data)])
+
+    keyboard = InlineKeyboardMarkup(buttons)
 
     return await send_message(text, reply_markup=keyboard)
 

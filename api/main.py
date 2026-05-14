@@ -69,7 +69,8 @@ async def lifespan(app: FastAPI):
             BotCommand("weather", "Check weather forecast"),
             BotCommand("briefing", "Get your morning briefing"),
             BotCommand("markets", "Check stock & crypto prices"),
-            BotCommand("websearch", "Search the internet")
+            BotCommand("websearch", "Search the internet"),
+            BotCommand("status", "System health & stats"),
         ])
         log.info("telegram_bot_initialized_with_commands")
     except Exception as exc:
@@ -106,11 +107,13 @@ from api.routes.gmail import router as gmail_router
 from api.routes.slack import router as slack_router
 from api.routes.discord_route import router as discord_route_router
 from api.routes.internal import router as internal_router
+from api.routes.sms import router as sms_router
 
 app.include_router(telegram_router, prefix="/webhook")
 app.include_router(gmail_router, prefix="/webhook")
 app.include_router(slack_router, prefix="/webhook")
 app.include_router(discord_route_router, prefix="/webhook")
+app.include_router(sms_router)  # has /webhook/twilio inside
 app.include_router(internal_router, prefix="/internal")
 
 

@@ -29,7 +29,7 @@ INTENT_SYSTEM = "You are an intent parser. Return ONLY valid JSON."
 
 INTENT_PROMPT = """Parse the user's message and return JSON:
 {{
-  "intent": "<reply|reminder|search|schedule|note|expense|habit|spotify|weather|summary|github|briefing|markets|websearch|unknown>",
+  "intent": "<reply|reminder|search|schedule|note|expense|habit|spotify|weather|summary|github_action|create_memory|send_sms|system_status|briefing|markets|websearch|unknown>",
   "params": {{}}
 }}
 
@@ -44,8 +44,11 @@ Param schemas per intent:
 - habit:    {{"action": "checkin|list|add|delete", "name": str|null}}
 - spotify:  {{"action": "play|pause|skip|nowplaying|queue", "query": str|null}}
 - weather:  {{}}
-- summary:  {{"platform": "all|gmail|whatsapp|notes", "period": "today|week|month|all|unread"}} (use for general requests like 'today mail', 'read my emails', 'summarise my messages')
-- github:   {{"action": "prs|issues|notifications"}}
+- summary:  {{"platform": "all|gmail|whatsapp|notes", "period": "today|week|month|all|unread"}}
+- github_action: {{"action": "prs|issues|notifications|merge|close|comment|create_issue", "repo": str|null, "number": int|null, "text": str|null}}
+- create_memory: {{"fact": str, "entity": str|null}}
+- send_sms: {{"to": str, "message": str}}
+- system_status: {{}}
 - briefing: {{}}
 - markets:  {{"symbols": list[str]}} (Extract stock tickers or crypto names. Empty list for general overview)
 - websearch: {{"query": str}} (Extract a clear search query for a web search engine)

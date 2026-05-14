@@ -75,6 +75,12 @@ async def process_inbound_message(ctx: dict, msg_dict: dict) -> None:
         # 5. Upsert contact
         contact = await _upsert_contact(db, msg, result)
 
+        # 5.5 Record conversation turn
+        from api.services.conversation_service import append_turn, maybe_compress
+        if msg.content:
+            await append_turn(db, contact.id, "user", msg.content)
+            await maybe_compress(db, contact.id)
+
         # 6. Upsert thread
         thread = await _upsert_thread(db, msg)
 
@@ -101,6 +107,9 @@ async def process_inbound_message(ctx: dict, msg_dict: dict) -> None:
 
         # 8. Score gate — notify if important enough
         if result.importance >= settings.importance_threshold:
+            from api.services.quick_reply_service import generate_quick_replies
+            qrs = await generate_quick_replies(msg.sender_name or msg.sender_id, msg.content or "") if msg.content else []
+            
             tg_msg_id = await telegram_service.send_notification(
                 msg_id=str(db_msg.id),
                 platform=msg.platform,
@@ -110,6 +119,8 @@ async def process_inbound_message(ctx: dict, msg_dict: dict) -> None:
                 category=result.category,
                 urgency=result.urgency,
                 subject=msg.subject,
+                content=msg.content,
+                quick_replies=qrs,
             )
             db_msg.telegram_msg_id = tg_msg_id
             await db.flush()
@@ -211,6 +222,7 @@ async def _handle_snooze(msg_id_str: str) -> None:
                     category=msg.category or "unknown",
                     urgency=msg.urgency or "whenever",
                     subject=msg.raw.get("subject"),
+                    content=msg.content,
                 )
         except Exception as exc:
             log.error("snooze_resend_failed", error=str(exc))

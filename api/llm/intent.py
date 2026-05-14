@@ -15,8 +15,8 @@ from api.llm.prompts import INTENT_PROMPT, INTENT_SYSTEM
 
 KNOWN_INTENTS = {
     "reply", "reminder", "search", "schedule", "note", "expense",
-    "habit", "spotify", "weather", "summary", "github", "unknown",
-    "briefing", "markets", "websearch",
+    "habit", "spotify", "weather", "summary", "github_action", "unknown",
+    "briefing", "markets", "websearch", "create_memory", "send_sms", "system_status", "compose_email"
 }
 
 

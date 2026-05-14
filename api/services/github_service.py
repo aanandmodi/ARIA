@@ -98,3 +98,59 @@ async def get_notifications() -> list[dict]:
     except Exception as exc:
         log.error("github_notifications_failed", error=str(exc))
         return []
+
+
+async def merge_pr(repo_name: str, pr_number: int, commit_message: str = "") -> bool:
+    """Merge a GitHub PR."""
+    gh = _get_github()
+    if gh is None: return False
+    try:
+        loop = asyncio.get_event_loop()
+        repo = await loop.run_in_executor(None, partial(gh.get_repo, repo_name))
+        pr = await loop.run_in_executor(None, partial(repo.get_pull, pr_number))
+        await loop.run_in_executor(None, partial(pr.merge, commit_message=commit_message))
+        return True
+    except Exception as exc:
+        log.error("github_merge_pr_failed", error=str(exc), repo=repo_name, pr=pr_number)
+        return False
+
+async def close_issue(repo_name: str, issue_number: int) -> bool:
+    """Close a GitHub Issue or PR."""
+    gh = _get_github()
+    if gh is None: return False
+    try:
+        loop = asyncio.get_event_loop()
+        repo = await loop.run_in_executor(None, partial(gh.get_repo, repo_name))
+        issue = await loop.run_in_executor(None, partial(repo.get_issue, issue_number))
+        await loop.run_in_executor(None, partial(issue.edit, state="closed"))
+        return True
+    except Exception as exc:
+        log.error("github_close_issue_failed", error=str(exc), repo=repo_name, issue=issue_number)
+        return False
+
+async def create_issue(repo_name: str, title: str, body: str = "") -> str | None:
+    """Create a new GitHub issue."""
+    gh = _get_github()
+    if gh is None: return None
+    try:
+        loop = asyncio.get_event_loop()
+        repo = await loop.run_in_executor(None, partial(gh.get_repo, repo_name))
+        issue = await loop.run_in_executor(None, partial(repo.create_issue, title=title, body=body))
+        return issue.html_url
+    except Exception as exc:
+        log.error("github_create_issue_failed", error=str(exc), repo=repo_name)
+        return None
+
+async def comment_issue(repo_name: str, issue_number: int, body: str) -> bool:
+    """Comment on a GitHub issue or PR."""
+    gh = _get_github()
+    if gh is None: return False
+    try:
+        loop = asyncio.get_event_loop()
+        repo = await loop.run_in_executor(None, partial(gh.get_repo, repo_name))
+        issue = await loop.run_in_executor(None, partial(repo.get_issue, issue_number))
+        await loop.run_in_executor(None, partial(issue.create_comment, body))
+        return True
+    except Exception as exc:
+        log.error("github_comment_issue_failed", error=str(exc), repo=repo_name, issue=issue_number)
+        return False
