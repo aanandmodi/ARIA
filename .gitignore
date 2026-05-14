@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+baileys/session/
+baileys/node_modules/
+baileys/package-lock.json
+*.log
+.DS_Store
+.venv/
+venv/
+node_modules/
+*.db
+*.sqlite3
+baileys/baileys_store.json

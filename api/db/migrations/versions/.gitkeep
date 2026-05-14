@@ -1,0 +1,5 @@
+# Alembic migration versions directory
+# Initial migration is handled by SQLAlchemy create_all in development.
+# For production, generate migrations with:
+#   alembic revision --autogenerate -m "initial"
+#   alembic upgrade head
