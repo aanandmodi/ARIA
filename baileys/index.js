@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion, makeInMemoryStore } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const express = require('express');
 const axios = require('axios');
 const { Boom } = require('@hapi/boom');
@@ -14,11 +14,8 @@ const PORT = parseInt(process.env.BAILEYS_PORT || '3001');
 
 let sock = null;
 
-const store = makeInMemoryStore({ });
-store.readFromFile(path.join(__dirname, 'baileys_store.json'));
-setInterval(() => {
-    store.writeToFile(path.join(__dirname, 'baileys_store.json'));
-}, 10000);
+const store = { messages: {} };
+
 
 async function startBaileys() {
     const sessionDir = path.join(__dirname, 'session');
@@ -34,7 +31,7 @@ async function startBaileys() {
         browser: ['ARIA', 'Chrome', '120.0'],
     });
 
-    store.bind(sock.ev);
+
 
 
     sock.ev.on('creds.update', saveCreds);
