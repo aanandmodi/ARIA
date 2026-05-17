@@ -42,18 +42,16 @@
 - [💡 The Problem ARIA Solves](#-the-problem-aria-solves)
 - [✨ Key Features](#-key-features)
 - [🏗 System Architecture](#-system-architecture)
-- [🧠 Advanced NLU Pipelines](#-advanced-nlu-pipelines)
-  - [NLU Intent Classifier Engine (Sliding Context Window)](#1-nlu-intent-classifier-engine-sliding-context-window)
-  - [WhatsApp LID & JID Resolution Engineering Insight](#2-whatsapp-lid--jid-resolution-engineering-insight)
-  - [GitHub Watcher & PR Watcher Cron Pipeline](#3-github-watcher--pr-watcher-cron-pipeline)
 - [🔬 Component Deep Dive](#-component-deep-dive)
-  - [Nginx — Reverse Proxy Ingress](#1-nginx--reverse-proxy--ingress)
+  - [Nginx — Ingress](#1-nginx--reverse-proxy--ingress)
   - [FastAPI Server](#2-fastapi-server-api)
-  - [ARQ Background Task Worker](#3-arq-task-worker-apiworkers)
-  - [Baileys WhatsApp Bridge](#4-baileys-whatsapp-bridge-baileys)
+  - [ARQ Task Worker](#3-arq-task-worker-apiworkers)
+  - [Baileys Bridge](#4-baileys-whatsapp-bridge-baileys)
   - [Groq LLM Engine](#5-groq-llm-engine-apillm)
-  - [Handlers & Services](#6-handlers--services-apihandlers)
-- [🗄 Database Architecture & Schema](#-database-architecture--schema)
+  - [Handlers](#6-handlers-apihandlers)
+  - [Services](#7-services-apiservices)
+- [🤖 LLM Pipeline](#-llm-pipeline--how-intelligence-works)
+- [🗄 Database Architecture](#-database-architecture--pipeline)
 - [📥 Inbound Communication Flow](#-communication-flow--inbound)
 - [📤 Outbound Command Flow](#-communication-flow--outbound)
 - [🔗 Integration Map](#-integration-map)
@@ -62,7 +60,7 @@
 - [🐳 Docker Infrastructure](#-infrastructure--docker-services)
 - [🚀 Quick Start](#-quick-start)
 - [🔧 Environment Variables](#-environment-variables)
-- [ Gotchas & Troubleshooting Guide](#-gotchas--troubleshooting-guide)
+- [🔄 Full Connection Map](#-how-each-piece-connects)
 - [🤝 Contributing](#-contributing)
 
 ---
@@ -87,16 +85,56 @@ At its core, ARIA is a **webhook-ingestion + intent-parsing engine**:
 
 ## 💡 The Problem ARIA Solves
 
-| ❌ Without ARIA | ✅ With ARIA |
-| :--- | :--- |
-| **8+ apps to constantly monitor & jump between** | **1 unified conversation channel (Telegram)** |
-| 📱 **WhatsApp** → open app & read chat | 📩 **WhatsApp messages** auto-notify with summaries |
-| 📧 **Gmail** → check inbox, parse spam | 📧 **Emails** filtered by LLM & high-priority forwarded |
-| 💬 **Slack / Discord** → endless notifications | 💬 **Workspaces** auto-aggregated and delivered |
-| 📓 **Notion** → open browser & find board | 📓 **Notion tasks** created using simple text commands |
-| 💻 **GitHub** → search commits & PR reviews | 💻 **Repositories** watched & managed directly in chat |
-| 📊 **Finances** → open manual spreadsheets | 💰 **Expense logs** instantly parsed & saved to DB |
-| **Result: Constant context-switching, mental fatigue** | **Result: 0 context-switches, peace of mind, high focus** |
+<table>
+<tr>
+<td width="50%">
+
+### ❌ Without ARIA
+
+```
+📱 WhatsApp  → open app
+📧 Gmail     → open app
+💬 Slack     → open app
+🎮 Discord   → open app
+📓 Notion    → open browser
+🎵 Spotify   → open app
+💻 GitHub    → open browser
+📊 Finances  → spreadsheet
+
+  ╔══════════════════════╗
+  ║  8 apps to manage    ║
+  ║  Constant switching  ║
+  ║  Hours lost daily    ║
+  ╚══════════════════════╝
+```
+
+</td>
+<td width="50%">
+
+### ✅ With ARIA
+
+```
+🤖 Telegram Bot  (1 interface)
+│
+├── 📩 WhatsApp messages
+├── 📧 Gmail (scored & triaged)
+├── 💬 Slack threads
+├── 🎮 Discord DMs
+├── 📓 Notion tasks
+├── 🎵 Spotify controls
+├── 💰 Expense tracking
+└── 📅 Calendar & reminders
+
+  ╔══════════════════════╗
+  ║  0 context switches  ║
+  ║  1 unified interface ║
+  ║  AI does the work    ║
+  ╚══════════════════════╝
+```
+
+</td>
+</tr>
+</table>
 
 ---
 
@@ -196,85 +234,9 @@ graph TB
 
 ---
 
-## 🧠 Advanced NLU Pipelines
-
-### 1. NLU Intent Classifier Engine (Sliding Context Window)
-
-Standard chatbots suffer from context dropouts on short replies (e.g. you say `"yes"`, `"do it"`, or `"hi"` and the bot defaults to generic conversational chatter). 
-
-ARIA implements a **V2 Context-Aware Sliding Window Intent Classifier** (`intent_unified.py`) that formats and injects the last 3 conversation turns from your Telegram Redis cache directly into the system prompt. This allows LLaMA 3.3 to resolve vague pronouns and follow-up replies perfectly.
-
-```mermaid
-flowchart TD
-    A["👤 User Command\n(e.g., 'yes please')"] --> B["⚡ Redis Cache\n(CONV_KEY)"]
-    B --> C["🔄 Fetch last 3 turns\n(User/Assistant history)"]
-    C --> D["📝 Format sliding window context\n[System Prompt + Context]"]
-    D --> E["🧠 Groq LLaMA 3.3 70B\nparse_intent_unified()"]
-    E --> F["📋 UnifiedIntentResult\n{ intent: 'send_whatsapp', confidence: 0.95 }"]
-    F --> G["🔀 Route to Handler\n(Resolves targets contextually)"]
-
-    style A fill:#e94560,color:#fff
-    style B fill:#DC382D,color:#fff
-    style E fill:#533483,color:#fff
-    style F fill:#009688,color:#fff
-```
-
-### 2. WhatsApp LID & JID Resolution Engineering Insight
-
-WhatsApp personal contact routing has a highly complex, protocol-level division that standard bridges fail to support:
-* **Standard JIDs (`@s.whatsapp.net`):** Normal phone accounts (e.g. `918829095225@s.whatsapp.net`).
-* **LID JIDs (`@lid`):** WhatsApp's companion device/hidden identifiers (e.g. `38302585458926@lid`).
-* **Group JIDs (`@g.us`):** Group channels (e.g. `120363422974535988@g.us`).
-
-If you attempt to send an LID message using `@s.whatsapp.net`, the WhatsApp server silently discards it into a black hole! 
-
-To solve this, ARIA implements a **mathematical JID length-and-prefix resolution heuristic** right in the handler layer:
-
-```mermaid
-flowchart TD
-    A["Target Contact JID\n(Without @ suffix)"] --> B{"Contains '-' or\nLength > 15?"}
-    B -->|Yes| C["Qualify as Group Chat:\nJID + '@g.us'"]
-    B -->|No| D{"Length in\n(13, 14, 15)?"}
-    D -->|Yes| E["Qualify as Companion Device LID:\nJID + '@lid'"]
-    D -->|No| F["Qualify as Standard Account JID:\nJID + '@s.whatsapp.net'"]
-
-    style A fill:#e94560,color:#fff
-    style C fill:#27ae60,color:#fff
-    style E fill:#f39c12,color:#fff
-    style F fill:#2b5278,color:#fff
-```
-
-#### JID Namespace Comparison Table
-
-| Format | Length (digits) | Prefix Characteristics | Suffix Appended | Delivery Namespace |
-| :--- | :---: | :--- | :---: | :--- |
-| **Standard Phone** | Exactly 12 | Starts with Country Code (e.g. `91` for India) | `@s.whatsapp.net` | Standard Chat |
-| **Companion LID** | 13, 14, or 15 | Starts with companion nodes (`18`, `27`, `38`, `95`) | `@lid` | Companion/Hidden Account |
-| **Group Chat** | > 15 | Starts with `1203` | `@g.us` | Group Threads |
-
-### 3. GitHub Watcher & PR Watcher Cron Pipeline
-
-ARIA keeps you updated on your codebase asynchronously using a highly optimized background cron task worker:
-
-```mermaid
-flowchart TD
-    A["⏰ Background Cron Trigger\n(cron:poll_github)"] --> B["🌐 GitHub REST API\n(Fetch PRs, commits, issues)"]
-    B --> C["📝 Compare with Database\n(Filter out duplicates)"]
-    C --> D["🗃️ Store new items\nin PostgreSQL"]
-    D --> E["📱 Forward digest notifications\nto Telegram Bot"]
-    E --> F["💡 Suggesters & Review Actions\n(Merges, Comments, Closes)"]
-
-    style A fill:#f39c12,color:#fff
-    style B fill:#1a1a2e,stroke:#e94560,color:#fff
-    style D fill:#336791,color:#fff
-    style E fill:#27ae60,color:#fff
-```
-
----
-
 ## 🔬 Component Deep Dive
 
-### 1. Nginx — Reverse Proxy Ingress
+### 1. Nginx — Reverse Proxy / Ingress
 
 Nginx is the **single public-facing door** to ARIA. It terminates HTTPS, routes webhook requests, and rate-limits traffic.
 
@@ -298,7 +260,7 @@ flowchart LR
 
 ### 2. FastAPI Server (`api/`)
 
-The brain of ARIA's request handling, providing rapid async ingress.
+The brain of ARIA's request handling.
 
 ```mermaid
 graph LR
@@ -327,9 +289,9 @@ graph LR
 
 ---
 
-### 3. ARQ Background Task Worker (`api/workers/`)
+### 3. ARQ Task Worker (`api/workers/`)
 
-The async **workhorse** that processes every job from Redis without blocking API routes.
+The async **workhorse** that processes every job from Redis.
 
 ```mermaid
 graph TD
@@ -354,7 +316,7 @@ graph TD
 
 ### 4. Baileys WhatsApp Bridge (`baileys/`)
 
-A dedicated **Node.js / Express** microservice maintaining the WhatsApp Web multi-device WebSocket session, fully patched against companion QR re-pairing loops.
+A dedicated **Node.js / Express** microservice maintaining the WhatsApp Web multi-device WebSocket session.
 
 ```mermaid
 sequenceDiagram
@@ -369,30 +331,85 @@ sequenceDiagram
     FA-->>US: Telegram push notification
 
     US->>FA: Reply command
-    FA->>BA: POST /send {jid, text}
+    FA->>BA: POST /send {contact, body}
     BA->>WA: Send via WebSocket
     WA-->>US: ✅ Message delivered
 ```
 
 **Key files:** `baileys/index.js`, `baileys/Dockerfile`
 
+#### 📱 WhatsApp JID Namespace & Companion LID Resolution Heuristic
+WhatsApp personal contact routing has a highly complex, protocol-level division that standard bridges fail to support:
+* **Standard JIDs (`@s.whatsapp.net`):** Normal phone accounts (e.g. `918829095225@s.whatsapp.net`).
+* **LID JIDs (`@lid`):** WhatsApp's companion device/hidden identifiers (e.g. `38302585458926@lid`).
+* **Group JIDs (`@g.us`):** Group channels (e.g. `120363422974535988@g.us`).
+
+If you attempt to send an LID message using `@s.whatsapp.net`, the WhatsApp server silently discards it into a black hole! 
+
+To solve this, ARIA implements a **mathematical JID length-and-prefix resolution heuristic** right in the handler layer:
+
+```mermaid
+flowchart TD
+    A["Target Contact JID\n(Without @ suffix)"] --> B{"Contains '-' or\nLength > 15?"}
+    B -->|Yes| C["Qualify as Group Chat:\nJID + '@g.us'"]
+    B -->|No| D{"Length in\n(13, 14, 15)?"}
+    D -->|Yes| E["Qualify as Companion Device LID:\nJID + '@lid'"]
+    D -->|No| F["Qualify as Standard Account JID:\nJID + '@s.whatsapp.net'"]
+
+    style A fill:#e94560,color:#fff
+    style C fill:#27ae60,color:#fff
+    style E fill:#f39c12,color:#fff
+    style F fill:#2b5278,color:#fff
+```
+
+##### JID Namespace Comparison Table
+
+| Format | Length (digits) | Prefix Characteristics | Suffix Appended | Delivery Namespace |
+| :--- | :---: | :--- | :---: | :--- |
+| **Standard Phone** | Exactly 12 | Starts with Country Code (e.g. `91` for India) | `@s.whatsapp.net` | Standard Chat |
+| **Companion LID** | 13, 14, or 15 | Starts with companion nodes (`18`, `27`, `38`, `95`) | `@lid` | Companion/Hidden Account |
+| **Group Chat** | > 15 | Starts with `1203` | `@g.us` | Group Threads |
+
 ---
 
 ### 5. Groq LLM Engine (`api/llm/`)
 
-ARIA leverages Groq's high-speed inference to drive text processing and speech-to-text dynamically:
+ARIA uses **two Groq models** for different tasks:
 
-| Task Layer | Model Used | Temperature | Retries |
-| :--- | :--- | :---: | :---: |
-| **Classification Engine** | `llama-3.3-70b-versatile` | `0.1` | 3 |
-| **Contextual NLU Intent Classifier** | `llama-3.1-8b-instant` | `0.1` | 3 |
-| **STT Voice Transcription** | `whisper-large-v3` | `0.0` | 2 |
+| Model | Task | Max Tokens |
+|-------|------|-----------|
+| `llama-3.3-70b-versatile` | Classification, intent parsing, reply reformatting | ~200 |
+| `whisper-large-v3` | Voice note transcription | — |
+
+**`classify(message)`** — Returns structured importance scoring:
+
+```json
+{
+  "importance": 8,
+  "urgency": "high",
+  "summary": "Client asking for invoice by EOD",
+  "tone": "professional",
+  "suggested_reply": "I'll send it over within the hour."
+}
+```
+
+**`parse_intent(command)`** — Converts natural language to a structured action:
+
+```json
+{
+  "intent": "reply",
+  "platform": "whatsapp",
+  "contact": "John",
+  "tone": "casual",
+  "body": "Sure, see you at 6!"
+}
+```
 
 ---
 
-### 6. Handlers & Services (`api/handlers/`)
+### 6. Handlers (`api/handlers/`)
 
-Intent-specific executors are mapped dynamically to standard API services:
+Each parsed intent maps to a dedicated handler:
 
 ```mermaid
 graph TD
@@ -416,9 +433,139 @@ graph TD
 
 ---
 
-## 🗄 Database Architecture & Schema
+### 7. Services (`api/services/`)
 
-ARIA uses **PostgreSQL 16** with **SQLAlchemy Async ORM**. Database migrations are fully automated on startup using **Alembic**.
+Thin API client wrappers for each external platform:
+
+| Service File | External API | Auth Method | Direction |
+|---|---|---|---|
+| `telegram_service.py` | Telegram Bot API | Bot Token | Bidirectional |
+| `gmail_service.py` | Google Gmail API | OAuth 2.0 Refresh Token | Bidirectional |
+| `whatsapp_service.py` | Baileys REST | Internal HTTP | Bidirectional |
+| `slack_service.py` | Slack Web API | Bot Token | Bidirectional |
+| `discord_service.py` | Discord Bot API | Bot Token | Bidirectional |
+| `notion_service.py` | Notion API | Integration Token | Write only |
+| `github_service.py` | GitHub REST API | Personal Access Token | Read only |
+| `spotify_service.py` | Spotify Web API | OAuth 2.0 | Bidirectional |
+| `sms_service.py` | SMS Gateway | API Token | Bidirectional |
+
+---
+
+## 🤖 LLM Pipeline — How Intelligence Works
+
+### 📥 Inbound Classification Pipeline
+
+```mermaid
+flowchart TD
+    A["📨 Raw Message Arrives\n(Gmail / WhatsApp / Slack / Discord / SMS)"] --> B
+
+    B["🔌 Adapter Layer\nNormalize vendor payload"] --> C
+
+    C["📋 ARIA Message Schema\n{ source, contact, body, timestamp, media_url? }"] --> D
+
+    D["🧠 Groq API Call\nllama-3.3-70b-versatile\nSystem role + message body\nMax tokens: ~200"] --> E
+
+    E["📊 Classification Result\n{ importance: 1-10, urgency, summary, tone, suggested_reply }"] --> F
+
+    F{{"importance\n≥ THRESHOLD?"}}
+    F -->|YES| G["📱 Telegram Push\nNotification sent\nwith Reply Button"]
+    F -->|NO| H["🗃️ Stored Silently\nin PostgreSQL\nNo notification"]
+
+    style A fill:#e94560,color:#fff
+    style D fill:#533483,color:#fff
+    style E fill:#0f3460,color:#fff
+    style G fill:#27ae60,color:#fff
+    style H fill:#7f8c8d,color:#fff
+```
+
+### 📤 Outbound Intent Pipeline
+
+```mermaid
+flowchart TD
+    A["👤 User types in Telegram\ne.g. 'professional: Sorry I need to reschedule'\nor 'remind me to call John at 3pm'\nor 'play lo-fi on Spotify'"] --> B
+
+    B["🧠 Groq API Call\nparse_intent()\nllama-3.3-70b-versatile"] --> C
+
+    C["📋 Intent JSON\n{ intent, platform, contact, tone, params }"] --> D
+
+    D["🔀 Intent Router\nDispatches to correct Handler"] --> E
+
+    E{{"Intent Type?"}}
+    E -->|reply| F["💬 reply_handler\nRephrase → Send via Service"]
+    E -->|remind| G["⏰ reminder_handler\nStore + Schedule ARQ job"]
+    E -->|expense| H["💰 expense_handler\nParse → Save to DB"]
+    E -->|habit| I["✅ habit_handler\nMark → Update streak"]
+    E -->|schedule| J["📅 schedule_handler\nCalendar API call"]
+    E -->|play| K["🎵 spotify_handler\nSpotify playback control"]
+
+    F & G & H & I & J & K --> L["✅ Confirmation\nSent to Telegram"]
+
+    style A fill:#e94560,color:#fff
+    style B fill:#533483,color:#fff
+    style D fill:#0f3460,color:#fff
+    style L fill:#27ae60,color:#fff
+```
+
+### 🎙 Voice Note Pipeline
+
+```mermaid
+flowchart LR
+    A["🎙 Voice Note\n(WhatsApp / Telegram)"] --> B["⬇️ Download\naudio file"]
+    B --> C["📦 Upload to\nMinIO bucket"]
+    C --> D["🧠 Groq Whisper API\nwhisper-large-v3"]
+    D --> E["📝 Transcript Text"]
+    E --> F["🔁 classify()\nPipeline"]
+    F --> G["📱 Telegram\nNotification\n(with transcript)"]
+
+    style A fill:#e94560,color:#fff
+    style D fill:#533483,color:#fff
+    style G fill:#27ae60,color:#fff
+```
+
+### 🔄 Context-Aware NLU Pipeline (Sliding Window Classifier)
+
+Standard chatbots suffer from context dropouts on short replies (e.g. you say `"yes"`, `"do it"`, or `"hi"` and the bot defaults to generic conversational chatter). 
+
+ARIA implements a **V2 Context-Aware Sliding Window Intent Classifier** (`intent_unified.py`) that formats and injects the last 3 conversation turns from your Telegram Redis cache directly into the system prompt. This allows LLaMA 3.3 to resolve vague pronouns and follow-up replies perfectly.
+
+```mermaid
+flowchart TD
+    A["👤 User Command\n(e.g., 'yes please')"] --> B["⚡ Redis Cache\n(CONV_KEY)"]
+    B --> C["🔄 Fetch last 3 turns\n(User/Assistant history)"]
+    C --> D["📝 Format sliding window context\n[System Prompt + Context]"]
+    D --> E["🧠 Groq LLaMA 3.3 70B\nparse_intent_unified()"]
+    E --> F["📋 UnifiedIntentResult\n{ intent: 'send_whatsapp', confidence: 0.95 }"]
+    F --> G["🔀 Route to Handler\n(Resolves targets contextually)"]
+
+    style A fill:#e94560,color:#fff
+    style B fill:#DC382D,color:#fff
+    style E fill:#533483,color:#fff
+    style F fill:#009688,color:#fff
+```
+
+### 🐙 GitHub Watcher & Monitored Repository Watcher Pipeline
+
+ARIA keeps you updated on your codebase asynchronously using a highly optimized background cron task worker:
+
+```mermaid
+flowchart TD
+    A["⏰ Background Cron Trigger\n(cron:poll_github)"] --> B["🌐 GitHub REST API\n(Fetch PRs, commits, issues)"]
+    B --> C["📝 Compare with Database\n(Filter out duplicates)"]
+    C --> D["🗃️ Store new items\nin PostgreSQL"]
+    D --> E["📱 Forward digest notifications\nto Telegram Bot"]
+    E --> F["💡 Suggesters & Review Actions\n(Merges, Comments, Closes)"]
+
+    style A fill:#f39c12,color:#fff
+    style B fill:#1a1a2e,stroke:#e94560,color:#fff
+    style D fill:#336791,color:#fff
+    style E fill:#27ae60,color:#fff
+```
+
+---
+
+## 🗄 Database Architecture & Pipeline
+
+ARIA uses **PostgreSQL 16** with **SQLAlchemy Async ORM**. Migrations managed by **Alembic**.
 
 ### Entity Relationship Diagram
 
@@ -426,34 +573,27 @@ ARIA uses **PostgreSQL 16** with **SQLAlchemy Async ORM**. Database migrations a
 erDiagram
     messages {
         UUID id PK
-        varchar platform
-        varchar external_id
-        varchar sender_name
-        varchar sender_id
-        text content
-        timestamptz replied_at
+        varchar source
+        varchar contact
+        text body
+        text summary
         int importance
         varchar urgency
+        varchar tone
+        boolean is_read
+        boolean is_replied
+        text media_url
         timestamptz created_at
-    }
-
-    contacts {
-        UUID id PK
-        varchar name
-        varchar phone
-        varchar email
-        boolean is_group
-        varchar group_jid
-        jsonb platform_ids
-        timestamptz last_seen
     }
 
     intents {
         UUID id PK
-        text command_text
-        jsonb parsed_result
-        boolean success
+        text user_message
+        jsonb parsed_intent
+        jsonb handler_result
         timestamptz executed_at
+        boolean success
+        UUID message_id FK
     }
 
     expenses {
@@ -480,39 +620,61 @@ erDiagram
         timestamptz created_at
     }
 
+    follow_up_queue {
+        UUID id PK
+        varchar contact
+        varchar platform
+        timestamptz due_at
+        boolean is_done
+        UUID message_id FK
+    }
+
+    briefing_cache {
+        UUID id PK
+        date briefing_date
+        jsonb content
+        timestamptz sent_at
+    }
+
     messages ||--o{ intents : "triggers"
+    messages ||--o{ follow_up_queue : "queues"
 ```
 
-### Table Column Details
+### Database Write Pipeline
 
-#### 1. `messages` (Inbox Archive)
-Tracks incoming communications across all external platforms.
-* `id` (`UUID`, Primary Key)
-* `platform` (`VARCHAR`, e.g. `'gmail'`, `'whatsapp'`, `'slack'`, `'discord'`)
-* `external_id` (`VARCHAR`, Unique third-party message identifier)
-* `sender_name` (`VARCHAR`, Display name of sender)
-* `sender_id` (`VARCHAR`, Raw account ID/LID/JID)
-* `content` (`TEXT`, Message body or voice note transcript)
-* `importance` (`INTEGER`, LLM classification score 1-10)
-* `urgency` (`VARCHAR`, urgency priority e.g. `'low'`, `'normal'`, `'high'`)
+```mermaid
+flowchart TD
+    A["📨 Inbound Webhook"] --> B["👷 ARQ Worker\npicks up job"]
+    B --> C["🧠 LLM classify()"]
+    C --> D["🔐 SQLAlchemy\nAsync Session"]
+    D --> E["🐘 PostgreSQL Commit\n(ACID guaranteed)"]
+    E --> F["⚡ Redis\nJob acknowledged & removed"]
 
-#### 2. `contacts` (Identity Registry)
-Maintains unique identities mapped across multiple platforms.
-* `id` (`UUID`, Primary Key)
-* `name` (`VARCHAR`, Standardized full name)
-* `phone` (`VARCHAR`, Cleaned digits)
-* `email` (`VARCHAR`, Google-standard email)
-* `is_group` (`BOOLEAN`, true if group chat)
-* `group_jid` (`VARCHAR`, WhatsApp group identifier)
-* `platform_ids` (`JSONB`, e.g., `{"whatsapp": "38302585458926", "slack": "U12345"}`)
+    G["👤 User Command\nvia Telegram"] --> H["🧠 parse_intent()"]
+    H --> I{{"Intent Type?"}}
+    I -->|expense| J["💰 Write to\nexpenses table"]
+    I -->|remind| K["⏰ Write to reminders\n+ Schedule ARQ job"]
+    I -->|habit| L["✅ Update habits\nstreak counter"]
+    I -->|reply| M["✏️ Set is_replied=True\nLog to intents table"]
 
-#### 3. `expenses` (Finances Ledger)
-Logs natural-language transactions.
-* `id` (`UUID`, Primary Key)
-* `amount` (`NUMERIC`, Exact currency amount)
-* `category` (`VARCHAR`, e.g. `'Food'`, `'Transport'`, `'Utilities'`)
-* `description` (`TEXT`, Transaction details)
-* `logged_at` (`TIMESTAMPTZ`, Insertion timestamp)
+    style A fill:#e94560,color:#fff
+    style G fill:#e94560,color:#fff
+    style E fill:#336791,color:#fff
+    style F fill:#DC382D,color:#fff
+```
+
+### Alembic Migration Pipeline
+
+```mermaid
+flowchart LR
+    A["✏️ Developer changes\nSQLAlchemy model"] --> B["alembic revision\n--autogenerate"]
+    B --> C["📄 New migration script\napi/db/migrations/versions/"]
+    C --> D["alembic upgrade head\n(auto on container start)"]
+    D --> E["🐘 PostgreSQL\nschema updated"]
+
+    style A fill:#1a1a2e,stroke:#e94560,color:#fff
+    style E fill:#336791,color:#fff
+```
 
 ---
 
@@ -700,6 +862,24 @@ graph LR
     style INFRA fill:#1a1a2e,stroke:#2496ED,color:#fff
 ```
 
+| Layer | Technology | Version | Purpose |
+|---|---|---|---|
+| **Language** | Python | 3.11 | Core backend |
+| **API Framework** | FastAPI | Latest | Async HTTP server + webhook routing |
+| **ASGI Server** | Uvicorn + Gunicorn | Latest | Production ASGI serving |
+| **Task Queue** | ARQ | Latest | Async background job processing |
+| **Message Broker** | Redis | 7 | Job queue backbone + caching |
+| **Database** | PostgreSQL | 16 | Primary persistent data store |
+| **ORM** | SQLAlchemy (Async) | 2.x | Database abstraction + query building |
+| **Migrations** | Alembic | Latest | Schema versioning and migrations |
+| **Object Storage** | MinIO | Latest | Voice notes + media files |
+| **LLM Provider** | Groq | API | Fast LLaMA 3 inference |
+| **LLM Model** | LLaMA 3.3 70B | Versatile | Classification + intent parsing |
+| **STT Model** | Whisper Large V3 | via Groq | Voice note transcription |
+| **WhatsApp Bridge** | Baileys | Node.js | WhatsApp multi-device WebSocket |
+| **Proxy** | Nginx | 1.25 | Reverse proxy + ingress |
+| **Containerization** | Docker Compose | v3.9 | Full stack orchestration |
+
 ---
 
 ## 📂 Folder Structure
@@ -737,8 +917,8 @@ ARIA/
 │   │   └── briefing_handler.py         ─┘  Morning briefing assembly
 │   │
 │   ├── 🤖 llm/                          ← AI / LLM Layer
-│   │   ├── client.py                    │  Unified parametric LLM wrapper
-│   │   ├── intent_unified.py            │  Context-aware NLU Intent parser
+│   │   ├── classify.py                  │  Message importance scoring
+│   │   ├── parse_intent.py              │  NL → structured JSON intent
 │   │   ├── prompts.py                   │  All system/user prompt templates
 │   │   └── whisper.py                  ─┘  Voice → text via Groq Whisper
 │   │
@@ -775,12 +955,52 @@ ARIA/
 │   └── Dockerfile                      ─┘
 │
 ├── 🔑 .env.example                      ← Environment variable template
-│   ...
+├── 📋 alembic.ini                       ← Alembic migration config
+├── 📧 aria_gmail_auth.py                ← Gmail OAuth setup wizard
+├── 🔗 aria_register_webhook.py          ← Telegram webhook registration
+├── 🚀 aria_setup.py                     ← Interactive .env generator
+├── 🐳 docker-compose.yml                ← Full stack orchestration
+└── 🔀 nginx.conf                        ← Reverse proxy config
 ```
 
 ---
 
 ## 🐳 Infrastructure — Docker Services
+
+### Service Overview
+
+```mermaid
+graph TB
+    subgraph DOCKER["🐳 Docker Network: aria-net (bridge)"]
+        NX["⚙️ nginx\nnginx:1.25\n:80 → :8000\nReverse proxy / ingress"]
+        FA["🐍 api\n./api build\n:8000\nFastAPI + Gunicorn"]
+        WK["👷 worker\n./api build\nno port\nARQ background jobs"]
+        BA["📱 baileys\n./baileys\n:3001\nWhatsApp WS bridge"]
+        PG["🐘 postgres\npostgres:16\n:5432\nPrimary database"]
+        RD["⚡ redis\nredis:7\n:6379\nJob queue + cache"]
+        MN["📦 minio\nminio/minio\n:9000\nObject storage"]
+    end
+
+    subgraph VOLS["💾 Persistent Volumes"]
+        V1["postgres_data"]
+        V2["redis_data"]
+        V3["minio_data"]
+        V4["baileys_session"]
+    end
+
+    NX --> FA
+    FA --> PG & RD & MN & BA
+    WK --> PG & RD & MN
+    FA -.->|same image| WK
+
+    PG --- V1
+    RD --- V2
+    MN --- V3
+    BA --- V4
+
+    style DOCKER fill:#1a1a2e,stroke:#2496ED,color:#fff
+    style VOLS fill:#16213e,stroke:#f39c12,color:#fff
+```
 
 ### Service Dependency Graph
 
@@ -824,10 +1044,15 @@ graph TD
 git clone https://github.com/aanandmodi/ARIA.git
 cd ARIA
 
-# Copy and edit
+# 🪄 Run the interactive setup wizard (recommended)
+python aria_setup.py
+
+# OR manually copy and edit
 cp .env.example .env
 nano .env
 ```
+
+> The setup wizard walks you through every config value interactively and auto-generates secure secrets.
 
 ---
 
@@ -837,18 +1062,20 @@ nano .env
 docker compose up -d
 ```
 
-This spins up **7 containers** dynamically in a private bridged network.
+This spins up **7 containers**: `nginx`, `api`, `worker`, `baileys`, `postgres`, `redis`, `minio`.
 
 ---
 
 ### Step 3 — Expose & Register Webhook
 
 ```bash
-# 1. Start your public tunnel (e.g. ngrok)
+# 1. Start a public tunnel
 ngrok http 80
+# → Copy the https://xxxx.ngrok-free.app URL
 
-# 2. Register webhook in ARIA
+# 2. Register your webhook with Telegram
 python aria_register_webhook.py
+# → Paste your Ngrok URL when prompted
 ```
 
 ---
@@ -858,7 +1085,40 @@ python aria_register_webhook.py
 **📱 WhatsApp:**
 ```bash
 docker logs aria-baileys --follow
-# → Scan the QR code in terminal using your phone!
+# → Scan the QR code with WhatsApp → Linked Devices
+```
+
+**📧 Gmail:**
+```bash
+python aria_gmail_auth.py
+# → Follow the OAuth browser flow — saves refresh token to .env
+```
+
+**🔵 Discord / Slack:**
+```bash
+# Add bot tokens to .env and restart
+docker compose restart api worker
+```
+
+---
+
+### Step 5 — Start Using ARIA
+
+Send `/start` to your Telegram bot. You're live. 🎉
+
+```
+You: remind me to call John tomorrow at 3pm
+ARIA: ✅ Reminder set for tomorrow at 3:00 PM
+
+You: what's my schedule today?
+ARIA: 📅 Today's Schedule:
+      • 10:00 AM — Team standup
+      • 3:00 PM — Call John
+      • 5:30 PM — Gym
+
+You: professional: I'll need to reschedule our meeting
+ARIA: ✅ Replied to Priya on WhatsApp:
+      "I sincerely apologize, but I'll need to reschedule our meeting..."
 ```
 
 ---
@@ -880,10 +1140,101 @@ docker logs aria-baileys --follow
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` | Text classification + intent model |
 | `GROQ_WHISPER_MODEL` | `whisper-large-v3` | Voice transcription model |
 | `IMPORTANCE_THRESHOLD` | `6` | Min score (1–10) to trigger notifications |
+| `DRAFT_MODE` | `false` | If `true`, shows replies for approval before sending |
+
+### 🐘 Database (Auto-configured for Docker)
+
+| Variable | Default |
+|---|---|
+| `POSTGRES_DB` | `aria` |
+| `POSTGRES_USER` | `aria` |
+| `POSTGRES_HOST` | `postgres` |
+| `REDIS_HOST` | `redis` |
+| `MINIO_HOST` | `minio` |
+| `MINIO_BUCKET` | `aria-storage` |
+
+### 🔌 Integrations (All Optional)
+
+| Variable | Service |
+|---|---|
+| `GMAIL_CLIENT_ID` / `SECRET` / `REFRESH_TOKEN` | Gmail OAuth |
+| `DISCORD_BOT_TOKEN` | Discord |
+| `SLACK_BOT_TOKEN` / `SIGNING_SECRET` | Slack |
+| `NOTION_TOKEN` / `NOTES_DB_ID` / `TASKS_DB_ID` | Notion |
+| `GITHUB_TOKEN` / `USERNAME` / `REPOS` | GitHub |
+| `SPOTIFY_CLIENT_ID` / `SECRET` | Spotify |
+| `SMS_GATEWAY_URL` / `TOKEN` | SMS |
+
+### ⚙️ Preferences
+
+| Variable | Default | Description |
+|---|---|---|
+| `BRIEFING_TIME` | `08:00` | Time for morning digest (HH:MM) |
+| `TIMEZONE` | `Asia/Kolkata` | Your timezone |
+| `FOLLOW_UP_DAYS` | `3` | Days before auto follow-up reminder |
+| `LANGUAGE` | `en` | Response language |
 
 ---
 
-##  Gotchas & Troubleshooting Guide
+## 🔄 How Each Piece Connects
+
+```mermaid
+flowchart TD
+    EXT["🌍 External Services\n(WhatsApp, Gmail, Slack...)"]
+    NX["⚙️ Nginx\nReverse Proxy"]
+    FA["🐍 FastAPI\nWeb Server"]
+    RD["⚡ Redis\nJob Queue"]
+    WK["👷 ARQ Worker"]
+    GQ["🧠 Groq LLM API\n(LLaMA 3 + Whisper)"]
+    PG["🐘 PostgreSQL\nmessages · intents\nreminders · expenses\nhabits"]
+    MN["📦 MinIO\nMedia Storage"]
+    TG["📱 Telegram\nUser sees results"]
+
+    EXT -->|HTTPS webhook| NX
+    NX -->|Proxy :8000| FA
+    FA -->|Enqueue jobs| RD
+    RD -->|Poll jobs| WK
+    WK -->|LLM calls| GQ
+    WK -->|Read/Write| PG
+    WK -->|Upload/Download| MN
+    WK -->|Push notify| TG
+    TG -->|User replies| FA
+    FA -->|direct writes| PG
+
+    style EXT fill:#e94560,color:#fff
+    style NX fill:#0f3460,color:#fff
+    style FA fill:#009688,color:#fff
+    style RD fill:#DC382D,color:#fff
+    style WK fill:#533483,color:#fff
+    style GQ fill:#533483,color:#fff
+    style PG fill:#336791,color:#fff
+    style MN fill:#f39c12,color:#000
+    style TG fill:#2b5278,color:#fff
+```
+
+### Data Flow Summary
+
+| Step | From | To | Via | What Happens |
+|:---:|---|---|---|---|
+| **1** | External service | Nginx | HTTPS webhook | Message arrives |
+| **2** | Nginx | FastAPI | Internal HTTP | Signature validated |
+| **3** | FastAPI | Adapter | Function call | Payload normalized |
+| **4** | FastAPI | Redis | ARQ enqueue | Job queued |
+| **5** | Redis | ARQ Worker | Job poll | Worker picks up job |
+| **6** | ARQ Worker | Groq API | HTTPS | Message classified |
+| **7** | ARQ Worker | PostgreSQL | SQLAlchemy | Results persisted |
+| **8** | ARQ Worker | MinIO | S3 API | Media stored |
+| **9** | ARQ Worker | Telegram API | HTTPS | User notified |
+| **10** | Telegram | FastAPI | Webhook | User replies |
+| **11** | FastAPI | ARQ Worker | Redis queue | Command queued |
+| **12** | ARQ Worker | Groq API | HTTPS | Intent parsed |
+| **13** | ARQ Worker | Handler | Function call | Action dispatched |
+| **14** | Handler | External service | Service API | Action executed |
+| **15** | Handler | Telegram | HTTPS | Confirmation sent |
+
+---
+
+##  Gotchas & Production Troubleshooting Guide
 
 ### 1. 📱 WhatsApp: "Sent successfully" but not showing up on target phone
 * **Reason:** The target contact in the database is saved under an **LID namespace** (13, 14, or 15-digit number) but was incorrectly qualified with `@s.whatsapp.net`. The message went into a black hole!
@@ -916,12 +1267,33 @@ Contributions are warmly welcome! Here's how to get started:
 
 ```bash
 # 1. Fork the repository on GitHub
+
 # 2. Create your feature branch
 git checkout -b feature/add-new-integration
 
-# 3. Add your integration, commit, and push!
-# 4. Open a Pull Request 🎉
+# 3. Add your integration
+#    → api/services/    (new API client)
+#    → api/adapters/    (new inbound normalizer)
+#    → api/handlers/    (new intent handler)
+#    → .env.example     (new config vars)
+
+# 4. Test locally
+docker compose up -d
+python aria_register_webhook.py
+
+# 5. Open a Pull Request 🎉
 ```
+
+### Areas for Contribution
+
+| Area | Description |
+|---|---|
+| 🔌 **New Integrations** | Linear, Jira, Trello, Obsidian, etc. |
+| 🧠 **LLM Prompt Tuning** | Better classification + intent accuracy |
+| 📊 **Web Dashboard** | Message history visualization UI |
+| 📱 **Mobile Admin** | Mobile-friendly management interface |
+| 🌍 **i18n Support** | Additional language support |
+| 🧪 **Tests** | Unit and integration test coverage |
 
 ---
 
