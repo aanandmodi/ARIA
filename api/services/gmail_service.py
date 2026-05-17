@@ -313,3 +313,187 @@ async def create_draft(to: str, subject: str, body: str) -> str:
     except Exception as exc:
         log.error("gmail_draft_failed", error=str(exc))
         return ""
+
+
+async def send_email(to: str, subject: str, body: str) -> bool:
+    """Send a new email."""
+    try:
+        svc = _get_service()
+        if svc is None:
+            return False
+        
+        message = MIMEText(body)
+        message['to'] = to
+        message['subject'] = subject
+        
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            partial(
+                svc.users().messages().send(
+                    userId='me',
+                    body={'raw': raw}
+                ).execute
+            )
+        )
+        
+        log.info("gmail_sent", to=to, subject=subject)
+        return True
+    except Exception as exc:
+        log.error("gmail_send_failed", error=str(exc), to=to)
+        return False
+
+
+async def send_reply(message_id: str, reply_text: str) -> bool:
+    """Send a reply to an email thread."""
+    try:
+        svc = _get_service()
+        if svc is None:
+            return False
+        
+        # Get original message
+        loop = asyncio.get_event_loop()
+        original = await loop.run_in_executor(
+            None,
+            partial(
+                svc.users().messages().get(
+                    userId='me',
+                    id=message_id,
+                    format='full'
+                ).execute
+            )
+        )
+        
+        # Extract headers
+        headers = {h['name']: h['value'] for h in original['payload']['headers']}
+        to = headers.get('From', '')
+        subject = headers.get('Subject', '')
+        thread_id = original.get('threadId')
+        
+        # Create reply
+        message = MIMEText(reply_text)
+        message['to'] = to
+        message['subject'] = f"Re: {subject}" if not subject.startswith('Re:') else subject
+        message['In-Reply-To'] = headers.get('Message-ID', '')
+        message['References'] = headers.get('References', '') + ' ' + headers.get('Message-ID', '')
+        
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        
+        await loop.run_in_executor(
+            None,
+            partial(
+                svc.users().messages().send(
+                    userId='me',
+                    body={'raw': raw, 'threadId': thread_id}
+                ).execute
+            )
+        )
+        
+        log.info("gmail_reply_sent", message_id=message_id, to=to)
+        return True
+    except Exception as exc:
+        log.error("gmail_reply_failed", error=str(exc), message_id=message_id)
+        return False
+
+
+async def get_contacts(limit: int = 100) -> list[dict]:
+    """Get Gmail contacts from People API."""
+    from api.core.cache import cached
+    
+    @cached("contacts_gmail", ttl=3600)
+    async def _fetch_contacts():
+        try:
+            creds = _get_credentials()
+            if creds is None:
+                return []
+            
+            from googleapiclient.discovery import build as build_service
+            people_service = build_service('people', 'v1', credentials=creds, cache_discovery=False)
+            
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None,
+                partial(
+                    people_service.people().connections().list(
+                        resourceName='people/me',
+                        pageSize=limit,
+                        personFields='names,emailAddresses'
+                    ).execute
+                )
+            )
+            
+            connections = results.get('connections', [])
+            
+            contacts = []
+            for c in connections:
+                names = c.get('names', [])
+                emails = c.get('emailAddresses', [])
+                
+                if names and emails:
+                    contacts.append({
+                        "name": names[0].get('displayName', ''),
+                        "email": emails[0].get('value', ''),
+                        "platform": "gmail"
+                    })
+            
+            log.info("gmail_contacts_fetched", count=len(contacts))
+            return contacts
+        except Exception as exc:
+            log.error("gmail_contacts_failed", error=str(exc))
+            return []
+    
+    return await _fetch_contacts()
+
+
+async def search_messages(query: str, limit: int = 10) -> list[dict]:
+    """Search Gmail messages."""
+    try:
+        svc = _get_service()
+        if svc is None:
+            return []
+        
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None,
+            partial(
+                svc.users().messages().list(
+                    userId='me',
+                    q=query,
+                    maxResults=limit
+                ).execute
+            )
+        )
+        
+        messages = results.get('messages', [])
+        
+        search_results = []
+        for msg in messages:
+            # Get message details
+            details = await loop.run_in_executor(
+                None,
+                partial(
+                    svc.users().messages().get(
+                        userId='me',
+                        id=msg['id'],
+                        format='metadata',
+                        metadataHeaders=['From', 'Subject']
+                    ).execute
+                )
+            )
+            
+            headers = {h['name']: h['value'] for h in details['payload']['headers']}
+            
+            search_results.append({
+                "id": msg['id'],
+                "from": headers.get('From', ''),
+                "subject": headers.get('Subject', ''),
+                "snippet": details.get('snippet', '')
+            })
+        
+        log.info("gmail_search_complete", query=query, results=len(search_results))
+        return search_results
+    except Exception as exc:
+        log.error("gmail_search_failed", error=str(exc), query=query)
+        return []

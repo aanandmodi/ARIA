@@ -12,7 +12,7 @@ from api.core.logging import log
 
 async def dispatch(intent: IntentResult, db: AsyncSession, update: Update) -> None:
     """Route an IntentResult to the correct handler."""
-    from api.handlers import reply_handler, reminder_handler, search_handler, email_handler
+    from api.handlers import reply_handler, reminder_handler, search_handler, email_handler, whatsapp_handler, github_handler
     from api.handlers import schedule_handler, note_handler, expense_handler
     from api.handlers import habit_handler, spotify_handler, summary_handler
 
@@ -21,6 +21,10 @@ async def dispatch(intent: IntentResult, db: AsyncSession, update: Update) -> No
     match intent.intent:
         case "reply":
             await reply_handler.handle(intent.params, db, update)
+        case "send_whatsapp":
+            await whatsapp_handler.handle(intent.params, db, update)
+        case "github_action":
+            await github_handler.handle(intent.params, db, update)
         case "compose_email":
             await email_handler.handle(intent.params, db, update)
         case "reminder":

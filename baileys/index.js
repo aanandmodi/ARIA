@@ -13,6 +13,7 @@ const ARIA_URL = process.env.ARIA_INTERNAL_URL || 'http://api:8000/internal/what
 const PORT = parseInt(process.env.BAILEYS_PORT || '3001');
 
 let sock = null;
+const contacts = {};
 
 const store = { messages: {} };
 
@@ -31,8 +32,24 @@ async function startBaileys() {
         browser: ['ARIA', 'Chrome', '120.0'],
     });
 
+    sock.ev.on('contacts.upsert', (newContacts) => {
+        for (const contact of newContacts) {
+            contacts[contact.id] = {
+                id: contact.id,
+                name: contact.name || contact.notify || contact.verifiedName || '',
+                phone: contact.id.split('@')[0],
+            };
+        }
+    });
 
-
+    sock.ev.on('contacts.update', (updates) => {
+        for (const update of updates) {
+            if (contacts[update.id]) {
+                if (update.name) contacts[update.id].name = update.name;
+                if (update.verifiedName) contacts[update.id].name = update.verifiedName;
+            }
+        }
+    });
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -70,6 +87,13 @@ async function startBaileys() {
                 if (jid === 'status@broadcast') continue;
 
                 const pushName = msg.pushName || '';
+                if (jid && pushName && !jid.endsWith('@g.us')) {
+                    contacts[jid] = {
+                        id: jid,
+                        name: pushName,
+                        phone: jid.split('@')[0],
+                    };
+                }
                 const messageId = msg.key.id || '';
                 let messageType = 'text';
                 let text = '';
@@ -185,6 +209,37 @@ async function startBaileys() {
             res.json({ ok: true, results });
         } catch (err) {
             console.error('Search error:', err.message);
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get('/contacts', async (req, res) => {
+        try {
+            if (!sock) return res.status(500).json({ error: 'Socket not initialized' });
+            const list = Object.values(contacts).map(c => ({
+                jid: c.id,
+                name: c.name || c.id.split('@')[0],
+                phone: c.id.split('@')[0],
+                isGroup: false
+            }));
+            
+            try {
+                const groups = await sock.groupFetchAllParticipating();
+                for (const g of Object.values(groups)) {
+                    list.push({
+                        jid: g.id,
+                        name: g.subject,
+                        phone: '',
+                        isGroup: true
+                    });
+                }
+            } catch (groupErr) {
+                console.error('Failed to fetch groups:', groupErr.message);
+            }
+            
+            res.json({ ok: true, contacts: list });
+        } catch (err) {
+            console.error('Fetch contacts error:', err.message);
             res.status(500).json({ error: err.message });
         }
     });

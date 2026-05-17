@@ -1,126 +1,153 @@
-import asyncio
-import logging
-import os
-from typing import List, Dict, Any
+"""
+Rolling conversation history in Redis.
+Every Telegram exchange is stored here and injected into every Groq call.
+This is why the bot will finally understand context.
+"""
+from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, asc
+import json
+from datetime import datetime
 
-from api.db.models import ConversationTurn, Contact
-from groq import AsyncGroq
+from redis.asyncio import Redis
 
-import uuid
+from api.core.logging import log
+from api.llm.client import groq_client
 
-logger = logging.getLogger(__name__)
+CONV_KEY = "aria:conv"
+SUMMARY_KEY = "aria:conv_summary"
+MAX_TURNS = 15  # 15 exchanges = 30 redis entries (user + assistant)
 
-async def append_turn(db: AsyncSession, contact_id: uuid.UUID, role: str, content: str) -> ConversationTurn:
+
+async def append_turn(
+    redis: Redis,
+    role: str,
+    content: str,
+    intent: str = "",
+) -> None:
     """
-    Append a new conversation turn to the database.
-    role: 'user', 'assistant', 'system'
-    """
-    turn = ConversationTurn(
-        contact_id=contact_id,
-        role=role,
-        content=content
-    )
-    db.add(turn)
-    await db.flush()
-    await db.refresh(turn)
-    return turn
-
-async def get_recent_history(db: AsyncSession, contact_id: uuid.UUID, limit: int = 10) -> List[Dict[str, str]]:
-    """
-    Get the most recent conversation history for a contact.
-    Returned format is suitable for LLM APIs: [{"role": "user", "content": "..."}]
-    """
-    stmt = (
-        select(ConversationTurn)
-        .where(ConversationTurn.contact_id == contact_id)
-        .order_by(ConversationTurn.created_at.desc())
-        .limit(limit)
-    )
-    result = await db.execute(stmt)
-    results = result.scalars().all()
+    Append a conversation turn to Redis.
     
-    # Reverse to get chronological order (oldest first)
-    history = [
-        {"role": turn.role, "content": turn.content}
-        for turn in reversed(results)
-    ]
-    return history
+    Args:
+        redis: Redis connection
+        role: "user" or "assistant"
+        content: The message content
+        intent: Optional intent classification
+    """
+    turn = json.dumps({
+        "role": role,
+        "content": content,
+        "intent": intent,
+        "ts": datetime.utcnow().isoformat(),
+    })
+    
+    await redis.rpush(CONV_KEY, turn)
+    
+    # Keep only the last MAX_TURNS * 2 entries (user + assistant pairs)
+    await redis.ltrim(CONV_KEY, -(MAX_TURNS * 2), -1)
+    
+    # Set TTL to 2 hours
+    await redis.expire(CONV_KEY, 7200)
 
-async def _summarize_turns(turns: List[ConversationTurn]) -> str:
-    """Use Groq to summarize a list of conversation turns."""
+
+async def get_history(redis: Redis) -> list[dict]:
+    """
+    Get conversation history formatted for Groq.
+    
+    Returns:
+        List of {"role": "user"|"assistant", "content": str} dicts
+    """
     try:
-        client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        raw = await redis.lrange(CONV_KEY, 0, -1)
+        history = []
         
-        conversation_text = "\n".join([f"{t.role.capitalize()}: {t.content}" for t in turns])
-        
-        prompt = (
-            "Summarize the following conversation history concisely. "
-            "Retain the key facts, user intents, and important context. "
-            "Respond ONLY with the summary.\n\n"
-            f"{conversation_text}"
-        )
-        
-        response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Or whatever default model ARIA uses
-            messages=[
-                {"role": "system", "content": "You are a concise conversation summarizer."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=512
-        )
-        
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Error summarizing turns: {e}")
-        return "Conversation summary failed."
+        for item in raw:
+            try:
+                parsed = json.loads(item)
+                history.append({
+                    "role": parsed["role"],
+                    "content": parsed["content"]
+                })
+            except (json.JSONDecodeError, KeyError):
+                continue
+                
+        return history
+    except Exception as exc:
+        log.error("get_history_failed", error=str(exc))
+        return []
 
-async def maybe_compress(db: AsyncSession, contact_id: uuid.UUID, threshold: int = 20, compress_count: int = 15):
+
+async def get_summary(redis: Redis) -> str:
     """
-    If a contact has more than `threshold` turns, summarize the oldest `compress_count` turns 
-    into a single 'system' summary turn to save context window.
-    """
-    # Count total turns
-    count_stmt = select(func.count()).select_from(ConversationTurn).where(ConversationTurn.contact_id == contact_id)
-    result = await db.execute(count_stmt)
-    total_turns = result.scalar()
+    Get the compressed summary of older conversation turns.
     
-    if total_turns and total_turns > threshold:
-        logger.info(f"Compressing {compress_count} turns for contact {contact_id} (total: {total_turns})")
+    Returns:
+        Summary text or empty string
+    """
+    try:
+        summary_bytes = await redis.get(SUMMARY_KEY)
+        return summary_bytes.decode() if summary_bytes else ""
+    except Exception:
+        return ""
+
+
+async def maybe_compress(redis: Redis) -> None:
+    """
+    When history gets long, summarize old turns and start fresh.
+    
+    This prevents context window overflow while maintaining continuity.
+    """
+    try:
+        raw = await redis.lrange(CONV_KEY, 0, -1)
         
-        # Get oldest `compress_count` turns
-        oldest_stmt = (
-            select(ConversationTurn)
-            .where(ConversationTurn.contact_id == contact_id)
-            .order_by(ConversationTurn.created_at.asc())
-            .limit(compress_count)
-        )
-        result = await db.execute(oldest_stmt)
-        oldest_turns = list(result.scalars().all())
-        
-        if not oldest_turns:
+        # Only compress if we have more than MAX_TURNS * 2 entries
+        if len(raw) < MAX_TURNS * 2:
             return
             
-        # Summarize
-        summary_text = await _summarize_turns(oldest_turns)
+        # Take the first 20 turns to summarize
+        to_summarize = raw[:20]
         
-        # Delete old turns
-        for turn in oldest_turns:
-            await db.delete(turn)
+        text_lines = []
+        for item in to_summarize:
+            try:
+                parsed = json.loads(item)
+                role = parsed["role"].upper()
+                content = parsed["content"]
+                text_lines.append(f"{role}: {content}")
+            except (json.JSONDecodeError, KeyError):
+                continue
+        
+        if not text_lines:
+            return
             
-        # Insert summary turn
-        summary_turn = ConversationTurn(
-            contact_id=contact_id,
-            role="system",
-            content=f"[Summary of previous conversation]: {summary_text}"
+        text = "\n".join(text_lines)
+        
+        # Ask Groq to summarize
+        summary = await groq_client.chat(
+            f"Summarize this conversation in 4 concise sentences. "
+            f"Preserve: names, facts, decisions, context.\n\n{text}",
+            max_tokens=200,
+            temperature=0.3,
         )
         
-        summary_turn.created_at = oldest_turns[-1].created_at 
+        # Store summary
+        await redis.set(SUMMARY_KEY, summary, ex=86400)  # 24h TTL
         
-        db.add(summary_turn)
-        await db.flush()
-        logger.info(f"Compression complete for contact {contact_id}.")
+        # Clear old history (keep only recent turns)
+        await redis.delete(CONV_KEY)
+        
+        log.info("conversation_compressed", summary_length=len(summary))
+        
+    except Exception as exc:
+        log.error("maybe_compress_failed", error=str(exc))
 
+
+async def clear_history(redis: Redis) -> None:
+    """Clear all conversation history and summary."""
+    try:
+        await redis.delete(CONV_KEY)
+        await redis.delete(SUMMARY_KEY)
+        log.info("conversation_history_cleared")
+    except Exception as exc:
+        log.error("clear_history_failed", error=str(exc))
+
+# Made with Bob

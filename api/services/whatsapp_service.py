@@ -82,3 +82,83 @@ async def search_history(query: str, limit: int = 10) -> list[dict]:
     except Exception as exc:
         log.error("whatsapp_search_failed", error=str(exc), query=query)
         return []
+
+
+async def get_contacts() -> list[dict]:
+    """Get WhatsApp contacts."""
+    from api.core.cache import cached
+    
+    @cached("contacts_whatsapp", ttl=3600)
+    async def _fetch_contacts():
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{settings.baileys_url}/contacts")
+                resp.raise_for_status()
+                data = resp.json()
+                
+                contacts = []
+                for c in data.get("contacts", []):
+                    contacts.append({
+                        "name": c.get("name", c.get("phone", "")),
+                        "phone": c.get("phone", ""),
+                        "jid": c.get("jid", ""),
+                        "platform": "whatsapp"
+                    })
+                
+                log.info("whatsapp_contacts_fetched", count=len(contacts))
+                return contacts
+        except Exception as exc:
+            log.error("whatsapp_contacts_failed", error=str(exc))
+            return []
+    
+    return await _fetch_contacts()
+
+
+async def search_messages(query: str, limit: int = 10) -> list[dict]:
+    """Search WhatsApp messages."""
+    try:
+        results = await search_history(query, limit)
+        
+        formatted_results = []
+        for r in results:
+            formatted_results.append({
+                "contact": r.get("pushName", r.get("jid", "")),
+                "preview": r.get("message", {}).get("conversation", "")[:100],
+                "timestamp": r.get("messageTimestamp", ""),
+                "jid": r.get("jid", "")
+            })
+        
+        log.info("whatsapp_search_complete", query=query, results=len(formatted_results))
+        return formatted_results
+    except Exception as exc:
+        log.error("whatsapp_search_failed", error=str(exc), query=query)
+        return []
+
+
+async def get_chat_context(jid: str) -> dict:
+    """Get context about a WhatsApp chat (group vs personal, participants, etc.)."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{settings.baileys_url}/chat-info",
+                params={"jid": jid}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            is_group = jid.endswith("@g.us")
+            
+            return {
+                "is_group": is_group,
+                "participants": data.get("participants", []) if is_group else [],
+                "name": data.get("name", ""),
+                "jid": jid
+            }
+    except Exception as exc:
+        log.error("whatsapp_chat_context_failed", error=str(exc), jid=jid)
+        return {
+            "is_group": jid.endswith("@g.us"),
+            "participants": [],
+            "name": "",
+            "jid": jid
+        }

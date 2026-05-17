@@ -95,9 +95,13 @@ class Contact(Base):
     nickname: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     relationship_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     writing_style: Mapped[dict] = mapped_column(JSON, default=dict)
+    is_group: Mapped[bool] = mapped_column(Boolean, default=False)
+    group_jid: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     importance_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     style_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_response_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_outbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, server_default=func.now()
     )
@@ -143,6 +147,7 @@ class Reminder(Base):
     contact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    repeat: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, server_default=func.now()
@@ -163,8 +168,13 @@ class Note(Base):
     source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tags: Mapped[list] = mapped_column(JSON, default=list)
     notion_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+        server_default=func.now()
     )
 
 
@@ -231,6 +241,9 @@ class TelegramSession(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     last_message_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     last_platform: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_sender_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    last_sender_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    last_thread_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     state: Mapped[str] = mapped_column(String(32), default="idle")
     draft_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -253,6 +266,7 @@ class UserProfile(Base):
     active_hours_end: Mapped[int] = mapped_column(Integer, default=22)
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata")
     reply_format: Mapped[str] = mapped_column(String(64), default="auto")
+    draft_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     extra_prefs: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
@@ -280,6 +294,28 @@ class Memory(Base):
     access_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+
+# ─── Outbox ───────────────────────────────────────────────────────────────────
+
+class Outbox(Base):
+    """Tracks all outbound messages sent by ARIA."""
+    __tablename__ = "outbox"
+    __table_args__ = (
+        Index("ix_outbox_platform_recipient", "platform", "recipient_id"),
+        Index("ix_outbox_sent_at", "sent_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    recipient_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(String(32), default="sent")
+    follow_up_sent: Mapped[bool] = mapped_column(Boolean, default=False)
 class ConversationTurn(Base):
     __tablename__ = "conversation_turns"
     id: Mapped[uuid.UUID] = mapped_column(

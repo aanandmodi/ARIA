@@ -6,6 +6,7 @@ from arq import cron
 from arq.connections import RedisSettings
 from api.core.config import settings
 from api.workers.inbound import process_inbound_message
+from api.workers.telegram_processor import process_telegram_update
 from api.workers.briefing import send_morning_briefing
 from api.workers.polls import poll_rss_feeds, poll_reddit, poll_hn, poll_github
 from api.workers.markets import poll_stocks, poll_crypto
@@ -18,6 +19,7 @@ _minute = int(settings.briefing_time.split(":")[1]) if ":" in settings.briefing_
 class WorkerSettings:
     functions = [
         process_inbound_message,
+        process_telegram_update,
         check_single_followup,
     ]
     cron_jobs = [
@@ -25,7 +27,7 @@ class WorkerSettings:
         cron(poll_rss_feeds, minute={0, 30}),
         cron(poll_reddit, minute={15, 45}),
         cron(poll_hn, hour={7, 12, 18}),
-        cron(poll_github, minute={10}),
+        cron(poll_github, minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}),
         cron(poll_stocks, hour={9, 12, 15, 18}),
         cron(poll_crypto, minute={5}),
         cron(check_followup_nudges, hour={8}),

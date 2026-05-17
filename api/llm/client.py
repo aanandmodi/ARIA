@@ -1,140 +1,250 @@
 """
-Groq async client wrapper with retry logic and rate-limit awareness.
+Groq async client with proper retry, JSON parsing, and error handling.
+This is the foundation for all LLM interactions in ARIA.
 """
-
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-import time
+from typing import Any
 
-from groq import AsyncGroq, RateLimitError
+from groq import AsyncGroq
 
 from api.core.config import settings
 from api.core.logging import log
 
-_client: AsyncGroq | None = None
 
-# Simple in-memory rate-limit tracker
-_request_timestamps: list[float] = []
-_MAX_RPM = 25  # conservative limit for Groq free tier
+class GroqClient:
+    """Async Groq client with retry logic and structured output support."""
+    
+    def __init__(self):
+        self.client = AsyncGroq(api_key=settings.groq_api_key)
+        self.model = settings.groq_model
 
+    async def chat(
+        self,
+        prompt: str,
+        system: str | None = None,
+        max_tokens: int = 600,
+        temperature: float = 0.7,
+        retries: int = 3,
+        model: str | None = None,
+    ) -> str:
+        """
+        Send a chat completion request with retry logic.
+        
+        Args:
+            prompt: User message
+            system: System prompt (optional)
+            max_tokens: Maximum tokens in response
+            temperature: Sampling temperature (0-2)
+            retries: Number of retry attempts on failure
+            model: Custom model name to use instead of default
+            
+        Returns:
+            Response text from the model
+        """
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
 
-def get_groq_client() -> AsyncGroq:
-    """Return (and lazily create) the async Groq client."""
-    global _client
-    if _client is None:
-        _client = AsyncGroq(api_key=settings.groq_api_key)
-    return _client
+        for attempt in range(retries):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=model or self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as exc:
+                log.warning("groq_chat_attempt_failed", 
+                           attempt=attempt + 1, 
+                           error=str(exc)[:100])
+                if attempt == retries - 1:
+                    log.error("groq_chat_failed", error=str(exc))
+                    raise
+                # Exponential backoff
+                wait = 2 ** attempt
+                await asyncio.sleep(wait)
+        return ""
 
+    async def chat_json(
+        self,
+        prompt: str,
+        system: str | None = None,
+        retries: int = 3,
+        model: str | None = None,
+        max_tokens: int = 800,
+        temperature: float = 0.1,
+    ) -> dict | list:
+        """
+        Chat that returns parsed JSON with aggressive cleanup.
+        
+        This method:
+        1. Adds explicit JSON-only instructions to the system prompt
+        2. Uses low temperature for deterministic output
+        3. Strips markdown code fences
+        4. Retries with stricter prompts on parse failures
+        5. Returns empty dict/list as safe fallback
+        
+        Args:
+            prompt: User message requesting structured output
+            system: System prompt (will be enhanced with JSON instructions)
+            retries: Number of retry attempts
+            model: Custom model name to use instead of default
+            max_tokens: Maximum tokens in response
+            temperature: Sampling temperature
+            
+        Returns:
+            Parsed JSON as dict or list, or {} on failure
+        """
+        enhanced_system = (system or "") + (
+            "\n\nIMPORTANT: Return ONLY valid JSON. "
+            "No markdown code fences. No explanatory text. "
+            "Just raw JSON that can be parsed directly."
+        )
+        
+        for attempt in range(retries):
+            try:
+                raw = await self.chat(
+                    prompt=prompt,
+                    system=enhanced_system,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    model=model,
+                    retries=1,  # Retries are handled by the outer loop
+                )
+                
+                # Aggressive cleanup of markdown fences
+                cleaned = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+                cleaned = re.sub(r'\s*```$', '', cleaned, flags=re.MULTILINE)
+                cleaned = cleaned.strip()
+                
+                # Parse JSON
+                parsed = json.loads(cleaned)
+                return parsed
+                
+            except json.JSONDecodeError as exc:
+                log.warning("groq_json_parse_failed",
+                           attempt=attempt + 1,
+                           error=str(exc)[:100],
+                           raw_preview=raw[:200] if 'raw' in locals() else "N/A")
+                
+                if attempt == retries - 1:
+                    log.error("groq_json_failed_all_attempts", raw=raw[:500])
+                    return {}  # Safe fallback
+                    
+                # Make the prompt even more explicit on retry
+                enhanced_system += "\n\nYour previous response was not valid JSON. Try again with ONLY JSON."
+                await asyncio.sleep(1)
+                
+            except Exception as exc:
+                log.error("groq_json_unexpected_error", error=str(exc))
+                if attempt == retries - 1:
+                    return {}
+                await asyncio.sleep(2 ** attempt)
+                
+        return {}
 
-async def _rate_limit_delay() -> None:
-    """If we are approaching the rate limit, sleep briefly."""
-    now = time.time()
-    # Remove timestamps older than 60s
-    cutoff = now - 60
-    while _request_timestamps and _request_timestamps[0] < cutoff:
-        _request_timestamps.pop(0)
-
-    if len(_request_timestamps) >= _MAX_RPM - 2:
-        wait = 60 - (now - _request_timestamps[0]) + 1
-        if wait > 0:
-            log.warning("groq_rate_limit_preemptive_wait", wait_seconds=round(wait, 1))
-            await asyncio.sleep(wait)
-
-
-async def chat(
-    prompt: str,
-    system: str | None = None,
-    max_tokens: int = 1024,
-    temperature: float = 0.3,
-) -> str:
-    """
-    Send a chat completion to Groq with automatic retry on rate-limit errors.
-    Returns the assistant's response text.
-    """
-    client = get_groq_client()
-    messages: list[dict] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
-    last_error: Exception | None = None
-    for attempt in range(3):
+    async def chat_with_history(
+        self,
+        system: str,
+        history: list[dict],
+        current_message: str,
+        max_tokens: int = 800,
+        temperature: float = 0.75,
+    ) -> str:
+        """
+        Chat with full conversation history injected.
+        
+        This is the core method for conversational interactions where
+        context from previous messages matters.
+        
+        Args:
+            system: System prompt with personality/instructions
+            history: List of {"role": "user"|"assistant", "content": str}
+            current_message: The new user message
+            max_tokens: Maximum response length
+            temperature: Sampling temperature
+            
+        Returns:
+            Assistant's response
+        """
+        messages = [{"role": "system", "content": system}]
+        
+        # Add conversation history (limit to last 12 turns to stay within context)
+        messages.extend(history[-12:])
+        
+        # Add current message
+        messages.append({"role": "user", "content": current_message})
+        
         try:
-            await _rate_limit_delay()
-            start = time.time()
-
-            response = await client.chat.completions.create(
-                model=settings.groq_model,
+            response = await self.client.chat.completions.create(
+                model=self.model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-
-            _request_timestamps.append(time.time())
-            elapsed = round(time.time() - start, 2)
-            usage = response.usage
-            log.info(
-                "groq_chat",
-                tokens_in=usage.prompt_tokens if usage else 0,
-                tokens_out=usage.completion_tokens if usage else 0,
-                latency_s=elapsed,
-                attempt=attempt + 1,
-            )
-            return response.choices[0].message.content or ""
-
-        except RateLimitError as exc:
-            last_error = exc
-            wait = (2 ** attempt) * 2  # 2, 4, 8 seconds
-            log.warning("groq_rate_limited", attempt=attempt + 1, wait=wait)
-            await asyncio.sleep(wait)
-
+            return response.choices[0].message.content.strip()
         except Exception as exc:
-            last_error = exc
-            wait = (2 ** attempt)
-            log.error("groq_chat_error", error=str(exc), attempt=attempt + 1)
-            await asyncio.sleep(wait)
+            log.error("groq_chat_with_history_failed", error=str(exc))
+            # Fallback: try without history if context is too long
+            try:
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": current_message}
+                ]
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception:
+                return "I'm having trouble processing that right now. Please try again."
 
-    log.error("groq_chat_exhausted_retries", error=str(last_error))
-    return ""
+
+# Global instance
+groq_client = GroqClient()
+
+
+def get_groq_client() -> AsyncGroq:
+    """Get the raw AsyncGroq client instance."""
+    return groq_client.client
+
+
+# Convenience functions for backward compatibility
+async def chat(
+    prompt: str,
+    system: str | None = None,
+    max_tokens: int = 600,
+    temperature: float = 0.7,
+    model: str | None = None,
+) -> str:
+    """Convenience wrapper for groq_client.chat()"""
+    return await groq_client.chat(prompt, system, max_tokens, temperature, model=model)
 
 
 async def chat_json(
     prompt: str,
-    system: str,
-    max_tokens: int = 1024,
+    system: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 800,
     temperature: float = 0.1,
-) -> dict:
-    """
-    Chat completion that returns parsed JSON.
-    Strips markdown fences and retries once with a stricter prompt on parse failure.
-    """
-    raw = await chat(prompt, system=system, max_tokens=max_tokens, temperature=temperature)
+    retries: int = 3,
+) -> dict | list:
+    """Convenience wrapper for groq_client.chat_json()"""
+    return await groq_client.chat_json(
+        prompt=prompt,
+        system=system,
+        retries=retries,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
 
-    for attempt in range(2):
-        text = raw.strip()
-        # Strip markdown code fences
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            if attempt == 0:
-                log.warning("groq_json_parse_retry", raw_preview=text[:200])
-                raw = await chat(
-                    f"Your previous response was not valid JSON. "
-                    f"Return ONLY a valid JSON object, no markdown, no explanation.\n\n"
-                    f"Original request:\n{prompt}",
-                    system=system + "\nYou MUST respond with valid JSON only. No markdown fences.",
-                    max_tokens=max_tokens,
-                    temperature=0.0,
-                )
-            else:
-                log.error("groq_json_parse_failed", raw_preview=text[:200])
-                return {}
-
-    return {}
+# Made with Bob

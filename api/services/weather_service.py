@@ -1,11 +1,13 @@
 """
 Weather service — Open-Meteo (no API key needed).
+Enhanced with Redis caching for performance.
 """
 
 from __future__ import annotations
 
 import httpx
 
+from api.core.cache import cached
 from api.core.config import settings
 from api.core.logging import log
 
@@ -23,9 +25,12 @@ _TZ_COORDS: dict[str, tuple[float, float]] = {
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 
+@cached("weather", ttl=1800, key_builder=lambda tz=None: tz or settings.timezone)
 async def get_forecast(tz: str | None = None) -> dict:
     """
     Get today's weather forecast from Open-Meteo.
+    Cached for 30 minutes to reduce API calls.
+    
     Returns: {temp_max, temp_min, condition, precipitation_chance, wind}
     """
     timezone = tz or settings.timezone
@@ -49,15 +54,19 @@ async def get_forecast(tz: str | None = None) -> dict:
         daily = data.get("daily", {})
         weather_code = (daily.get("weathercode", [0]) or [0])[0]
 
-        return {
+        result = {
             "temp_max": (daily.get("temperature_2m_max", [None]) or [None])[0],
             "temp_min": (daily.get("temperature_2m_min", [None]) or [None])[0],
             "condition": _weather_code_to_text(weather_code),
             "precipitation_chance": (daily.get("precipitation_probability_max", [None]) or [None])[0],
             "wind": (daily.get("windspeed_10m_max", [None]) or [None])[0],
         }
+        
+        log.info("weather_fetched", timezone=timezone, condition=result["condition"])
+        return result
+        
     except Exception as exc:
-        log.error("weather_fetch_failed", error=str(exc))
+        log.error("weather_fetch_failed", error=str(exc), timezone=timezone)
         return {
             "temp_max": None,
             "temp_min": None,

@@ -75,12 +75,6 @@ async def process_inbound_message(ctx: dict, msg_dict: dict) -> None:
         # 5. Upsert contact
         contact = await _upsert_contact(db, msg, result)
 
-        # 5.5 Record conversation turn
-        from api.services.conversation_service import append_turn, maybe_compress
-        if msg.content:
-            await append_turn(db, contact.id, "user", msg.content)
-            await maybe_compress(db, contact.id)
-
         # 6. Upsert thread
         thread = await _upsert_thread(db, msg)
 

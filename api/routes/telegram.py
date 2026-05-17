@@ -1,27 +1,18 @@
 """
-Telegram webhook route — the primary user interface.
+Telegram webhook route — Ultra-fast webhook with ARQ offloading.
+Zero-timeout architecture: acknowledge within 50ms, process asynchronously.
 """
 from __future__ import annotations
-import json
+
 from fastapi import APIRouter, Request, Response
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update
+
 from api.core.config import settings
 from api.core.logging import log
-from api.db.models import TelegramSession
-from api.db.session import async_session_factory
-from api.llm.intent import parse_intent, IntentResult
-from api.llm.intent_v2 import parse_intent_v2
-from api.handlers.router import dispatch
-from api.handlers.reply_handler import handle_callback, handle as handle_reply
+from api.core.queue import enqueue
 from api.services import telegram_service
 
 router = APIRouter()
-
-# Intents that V2 specialises in — if V2 returns one of these with high
-# confidence, trust it and skip the V1 parse entirely.
-_V2_DEEP_INTENTS = {"github_action", "create_memory", "send_sms", "system_status"}
 
 WELCOME_MSG = (
     "👋 <b>Welcome to ARIA!</b>\n\n"
@@ -41,19 +32,30 @@ WELCOME_MSG = (
 
 @router.post("/telegram")
 async def telegram_webhook(request: Request) -> Response:
-    """Handle inbound Telegram webhook updates."""
-    # 1. Verify secret token
+    """
+    Handle inbound Telegram webhook updates.
+    
+    ZERO-TIMEOUT ARCHITECTURE:
+    - Verify secret token (5ms)
+    - Parse update (10ms)
+    - Enqueue to ARQ worker (20ms)
+    - Return 200 OK (total: <50ms)
+    
+    All processing happens asynchronously in the worker.
+    """
+    # 1. Verify secret token (fast path)
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     if settings.telegram_webhook_secret and secret != settings.telegram_webhook_secret:
         log.warning("telegram_webhook_invalid_secret")
         return Response(status_code=403)
 
+    # 2. Parse raw body
     try:
         body = await request.json()
     except Exception:
         return Response(status_code=400)
 
-    # 2. Parse Update
+    # 3. Quick validation - parse Update
     try:
         update = Update.de_json(body, telegram_service.get_bot())
     except Exception as exc:
@@ -63,112 +65,26 @@ async def telegram_webhook(request: Request) -> Response:
     if update is None:
         return Response(status_code=200)
 
-    # 3. Handle callback queries (inline button presses)
-    if update.callback_query:
-        user_id = update.callback_query.from_user.id if update.callback_query.from_user else 0
-        if user_id != settings.telegram_user_id:
-            return Response(status_code=200)
-        async with async_session_factory() as db:
-            try:
-                await handle_callback(update.callback_query, db)
-                await db.commit()
-            except Exception as exc:
-                log.error("callback_handler_error", error=str(exc))
-                await db.rollback()
+    # 4. Extract user ID for authorization
+    user_id = None
+    if update.callback_query and update.callback_query.from_user:
+        user_id = update.callback_query.from_user.id
+    elif update.message and update.message.from_user:
+        user_id = update.message.from_user.id
+
+    # 5. Quick auth check
+    if user_id and user_id != settings.telegram_user_id:
+        log.warning("telegram_unauthorized_user", user_id=user_id)
         return Response(status_code=200)
 
-    # 4. Handle text messages
-    if not update.message or not update.message.text:
-        return Response(status_code=200)
+    # 6. Enqueue to ARQ worker for async processing
+    # Convert Update to dict for serialization
+    await enqueue("process_telegram_update", body)
+    
+    log.info("telegram_update_enqueued",
+             has_message=bool(update.message),
+             has_callback=bool(update.callback_query))
 
-    from_user = update.message.from_user
-    if not from_user or from_user.id != settings.telegram_user_id:
-        log.warning("telegram_unauthorized_user", user_id=from_user.id if from_user else 0)
-        return Response(status_code=200)
-
-    text = update.message.text.strip()
-    log.info("telegram_message_received", text=text[:100])
-
-    # Handle /start command
-    if text == "/start":
-        await telegram_service.send_message(WELCOME_MSG)
-        return Response(status_code=200)
-
-    if text.startswith("/briefing"):
-        await telegram_service.send_typing()
-        from api.workers.briefing import send_morning_briefing
-        await send_morning_briefing({})
-        return Response(status_code=200)
-
-    if text.startswith("/markets"):
-        await telegram_service.send_typing()
-        from api.handlers import markets_handler
-        async with async_session_factory() as db:
-            await markets_handler.handle({}, db, update)
-        return Response(status_code=200)
-
-    if text.startswith("/websearch"):
-        await telegram_service.send_typing()
-        query = text.replace("/websearch", "").strip()
-        from api.handlers import websearch_handler
-        async with async_session_factory() as db:
-            await websearch_handler.handle({"query": query}, db, update)
-        return Response(status_code=200)
-
-    if text.startswith("/status"):
-        await telegram_service.send_typing()
-        async with async_session_factory() as db:
-            try:
-                await dispatch(IntentResult(intent="system_status", params={}), db, update)
-                await db.commit()
-            except Exception as exc:
-                log.error("status_command_error", error=str(exc))
-                await db.rollback()
-        return Response(status_code=200)
-
-    # 4b. Check if user is in reply session — if so, bypass LLM intent
-    #     and route directly to reply handler
-    async with async_session_factory() as db:
-        try:
-            result = await db.execute(
-                select(TelegramSession).where(
-                    TelegramSession.user_id == settings.telegram_user_id
-                )
-            )
-            session = result.scalar_one_or_none()
-            if session and session.state in ("awaiting_reply", "awaiting_approval"):
-                await telegram_service.send_typing()
-                await handle_reply({"text": text}, db, update)
-                await db.commit()
-                return Response(status_code=200)
-        except Exception as exc:
-            log.error("session_check_error", error=str(exc))
-            await db.rollback()
-
-    # 5. Two-stage NLU pipeline
-    await telegram_service.send_typing()
-
-    # Stage 1: Try V2 for deep-integration intents
-    intent_v2 = await parse_intent_v2(text)
-    if intent_v2.intent in _V2_DEEP_INTENTS and intent_v2.confidence >= 0.7:
-        # V2 is confident about a deep intent — use it directly
-        intent = IntentResult(intent=intent_v2.intent, params=intent_v2.params)
-        log.info("intent_parsed_v2", intent=intent.intent, confidence=intent_v2.confidence,
-                 params=str(intent.params)[:200])
-    else:
-        # Stage 2: Fall back to V1 for the full command set
-        intent = await parse_intent(text)
-        log.info("intent_parsed_v1", intent=intent.intent, params=str(intent.params)[:200])
-
-    # 6. Dispatch to handler
-    async with async_session_factory() as db:
-        try:
-            await dispatch(intent, db, update)
-            await db.commit()
-        except Exception as exc:
-            log.error("dispatch_error", error=str(exc), intent=intent.intent)
-            await db.rollback()
-            await telegram_service.send_message("⚠️ Something went wrong processing your request.")
-
+    # 7. Return immediately - worker handles everything else
     return Response(status_code=200)
 

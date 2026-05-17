@@ -150,12 +150,8 @@ async def _route_reply(original: Message, text: str, db: AsyncSession) -> None:
             contact = (await db.execute(stmt)).scalar_one_or_none()
             
         if contact:
-            from api.services.conversation_service import append_turn, maybe_compress
             from api.llm.memory_extractor import extract_and_store
-            
             await extract_and_store(original.content, text, db)
-            await append_turn(db, contact.id, "assistant", text)
-            await maybe_compress(db, contact.id)
             
         # Cancel follow-up if exists
         try:
