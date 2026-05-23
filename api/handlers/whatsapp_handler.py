@@ -34,7 +34,25 @@ async def handle(params: dict, db: AsyncSession, update: Update) -> None:
             )
         )
         result = await db.execute(stmt)
-        contacts = result.scalars().all()
+        contacts = list(result.scalars().all())
+        
+        if not contacts:
+            # Try fuzzy close matches over all database contacts
+            stmt_all = select(Contact)
+            all_result = await db.execute(stmt_all)
+            all_contacts = all_result.scalars().all()
+            
+            import difflib
+            names_map = {}
+            for c_obj in all_contacts:
+                if c_obj.name:
+                    names_map[c_obj.name.lower()] = c_obj
+                if c_obj.nickname:
+                    names_map[c_obj.nickname.lower()] = c_obj
+            
+            matches = difflib.get_close_matches(contact_name.lower(), list(names_map.keys()), n=1, cutoff=0.4)
+            if matches:
+                contacts = [names_map[matches[0]]]
         
         if not contacts:
             await telegram_service.send_message(f"❌ Could not find any contact or group matching '<b>{contact_name}</b>' on WhatsApp.")

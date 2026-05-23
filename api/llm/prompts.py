@@ -45,7 +45,7 @@ Param schemas per intent:
 - spotify:  {{"action": "play|pause|skip|nowplaying|queue", "query": str|null}}
 - weather:  {{}}
 - summary:  {{"platform": "all|gmail|whatsapp|notes", "period": "today|week|month|all|unread"}}
-- github_action: {{"action": "prs|issues|notifications|merge|close|comment|create_issue", "repo": str|null, "number": int|null, "text": str|null}}
+- github_action: {{"action": "prs|issues|notifications|merge|close|comment|create_issue|review", "repo": str|null, "number": int|null, "text": str|null}}
 - create_memory: {{"fact": str, "entity": str|null}}
 - send_sms: {{"to": str, "message": str}}
 - system_status: {{}}

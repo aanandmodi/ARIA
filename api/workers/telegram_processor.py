@@ -103,7 +103,18 @@ async def _handle_text_message(update: Update) -> None:
 
     # Handle /start command (instant response)
     if text == "/start":
-        await telegram_service.send_message(WELCOME_MSG)
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📊 Morning Briefing", callback_data="cmd:briefing"),
+                InlineKeyboardButton("🐙 GitHub Digest", callback_data="cmd:github"),
+            ],
+            [
+                InlineKeyboardButton("📈 Market Status", callback_data="cmd:markets"),
+                InlineKeyboardButton("🔧 System Status", callback_data="cmd:status"),
+            ]
+        ])
+        await telegram_service.send_message(WELCOME_MSG, reply_markup=keyboard)
         return
 
     # Send initial placeholder with progressive feedback

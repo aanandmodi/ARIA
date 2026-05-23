@@ -246,5 +246,29 @@ async def handle_callback(callback: CallbackQuery, db: AsyncSession) -> None:
                 log.error("qr_reply_failed", error=str(e))
         await telegram_service.answer_callback(callback.id, "Reply Sent ✓")
 
+    elif action == "cmd":
+        await telegram_service.answer_callback(callback.id, f"Running {msg_id_str}...")
+        try:
+            if msg_id_str == "briefing":
+                from api.workers.briefing import send_morning_briefing
+                await send_morning_briefing({})
+            elif msg_id_str == "github":
+                from api.services import github_service
+                digest = await github_service.get_digest()
+                if not digest or digest == "No GitHub updates.":
+                    await telegram_service.send_message("🐙 No open Pull Requests or Issues found in your monitored repositories.")
+                else:
+                    await telegram_service.send_message(f"🐙 <b>GitHub Status Digest:</b>\n\n{digest}")
+            elif msg_id_str == "markets":
+                from api.handlers import markets_handler
+                await markets_handler.handle({}, db, None)
+            elif msg_id_str == "status":
+                from api.handlers.router import dispatch
+                from api.llm.intent import IntentResult
+                await dispatch(IntentResult(intent="system_status", params={}), db, None)
+        except Exception as err:
+            log.error("cmd_callback_failed", error=str(err), cmd=msg_id_str)
+            await telegram_service.send_message(f"❌ Failed to run click command: {str(err)}")
+
     else:
         await telegram_service.answer_callback(callback.id)

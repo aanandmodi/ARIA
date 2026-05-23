@@ -52,6 +52,26 @@ async def handle(params: dict, db: AsyncSession, update: Update) -> None:
                 lines.append(f"• <code>{c['sha']}</code> {c['message']} (by {c['author']})")
             await telegram_service.send_message("\n".join(lines))
 
+    elif action == "review":
+        if not repo or not number:
+            await telegram_service.send_message("❌ Please specify both a repository name and PR number to review (e.g., 'review PR #5 in ARIA').")
+            return
+            
+        try:
+            pr_num = int(number)
+        except ValueError:
+            await telegram_service.send_message("❌ Invalid PR number.")
+            return
+
+        await telegram_service.send_message(f"🧠 Generating senior AI code review for PR #{pr_num} in <b>{repo}</b>...")
+        review_text = await github_service.review_pr(repo, pr_num)
+        
+        msg = (
+            f"🐙 <b>AI Code Review — PR #{pr_num} in {repo}</b>\n\n"
+            f"{review_text}"
+        )
+        await telegram_service.send_message(msg)
+
     elif action == "merge":
         if not repo or not number:
             await telegram_service.send_message("❌ Please specify both a repository name and PR number to merge (e.g., 'merge PR #5 in ARIA').")

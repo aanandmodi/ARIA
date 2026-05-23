@@ -66,3 +66,12 @@ async def poll_github(ctx: dict) -> None:
             })
     except Exception as exc:
         log.error("github_poll_error", error=str(exc))
+
+
+async def poll_whatsapp_contacts(ctx: dict) -> None:
+    """Synchronize WhatsApp contacts and groups from Baileys."""
+    from api.scripts.sync_whatsapp_contacts import sync
+    try:
+        await sync()
+    except Exception as exc:
+        log.error("whatsapp_contacts_sync_failed", error=str(exc))
